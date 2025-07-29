@@ -78,7 +78,7 @@ class FormFactorPlanar(ProfilePlanarBase):
         self._obs.ff_real = np.sum(delta * np.cos(angles) * self._bin_width, axis=0)
         self._obs.ff_imag = np.sum(delta * np.sin(angles) * self._bin_width, axis=0)
 
-        # This value at q=0 will be used for a correlation analysis and error estimate
+        # This value at q=0 will be used for a correlation analysis for now
         return np.sqrt(self._obs.ff_real[0] ** 2 + self._obs.ff_imag[0] ** 2)
 
     def _conclude(self) -> None:
@@ -88,7 +88,7 @@ class FormFactorPlanar(ProfilePlanarBase):
             self.means.ff_real**2 + self.means.ff_imag**2
         )
 
-        # error from error propagation of the form factor
+        # error from error propagation of the form factor, for errors of the imaginary and real components, standard error of means is used assuming frames form independent samples
         self.results.dform_factor = np.sqrt(
             (self.sems.ff_real * self.means.ff_real / self.results.form_factor) ** 2
             + (self.sems.ff_imag * self.means.ff_imag / self.results.form_factor) ** 2
