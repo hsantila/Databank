@@ -6,11 +6,6 @@ files and precomputed JSON data.
 Test data is stored in `./Data/Simulations.2`
 
 -------------------------------------------------------------------------------
-Currently, we do mocking of NMLDB_SIMU_PATH and it requires to be done once
-during pytest session. That's why we name this file "test2_api.py" because
-it avoids `pytest` from executing it together with other "test_*.py" files.
-Probably the problem can be solved using importlib and updating import specs.
-
 NOTE: globally import of DatabankLib is **STRICTLY FORBIDDEN** because it 
       breaks the substitution of global path folders
 """
@@ -18,6 +13,7 @@ NOTE: globally import of DatabankLib is **STRICTLY FORBIDDEN** because it
 import os
 import sys
 import pytest
+import pytest_check as check
 
 # run only on sim2 mocking data
 pytestmark = pytest.mark.sim2
@@ -45,9 +41,11 @@ def test_print_README(systems, capsys):
     sys0 = systems[0]
     print_README(sys0)
     output: str = capsys.readouterr().out.rstrip()
-    fDOI = output.find('DOI:') != -1
-    fTEMP = output.find('TEMPERATURE:') != -1
-    assert fDOI and fTEMP
+    check.not_equal( output.find('DOI:'), -1 )
+    check.not_equal( output.find('TEMPERATURE:'), -1)
+    print_README('example')
+    output = capsys.readouterr().out.rstrip()
+    check.is_in('Gromacs, Amber, NAMD', output)
 
 
 @pytest.mark.parametrize("systemid, result",

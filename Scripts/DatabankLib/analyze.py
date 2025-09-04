@@ -6,13 +6,14 @@
 
 import json
 import os
-import sys
 import re
 import traceback
 from logging import Logger
+import subprocess
 import buildh
 import urllib.request
 import socket
+from collections import deque
 
 from tqdm import tqdm
 import numpy as np
@@ -36,6 +37,7 @@ from DatabankLib.databankio import resolve_download_file_url
 from DatabankLib.databankop import find_OP
 from DatabankLib import analyze_nmrpca as nmrpca
 from DatabankLib.maicos import (
+    is_system_suitable_4_maicos,
     FormFactorPlanar,
     DielectricPlanar,
     DensityPlanar,
@@ -60,13 +62,20 @@ def computeNMRPCA(  # noqa: N802 (API)
     # getting data from databank and preprocessing them
     # Start Parser
     # TODO: 2test|    parser = Parser(NMLDB_SIMU_PATH, readme, eq_time_fname, testTraj)
-    parser = nmrpca.Parser(system, "eq_times.json")
-    # Check trajectory
-    print(parser._path)
-    vpcode = parser.validate_path()
-    print("ValidatePath code: ", vpcode)
+    try:
+        parser = nmrpca.Parser(system, "eq_times.json")
+        # Check trajectory
+        print(parser._path)
+        vpcode = parser.validate_path()
+        print("ValidatePath code: ", vpcode)
+    except Exception as e:
+        logger.error("Error initializing NMRPCA parser.")
+        logger.error(str(e))
+        logger.error(traceback.format_exc())
+        return RCODE_ERROR
+
     if vpcode > 0:
-        sys.stderr.write("Some errors in analyze_nmrpca.py::Parser constructor.\n")
+        logger.error("Some errors in analyze_nmrpca.py::Parser constructor.\n")
         return RCODE_ERROR
     elif vpcode < 0 and not recompute:
         return RCODE_SKIPPED
@@ -90,40 +99,47 @@ def computeNMRPCA(  # noqa: N802 (API)
         __ = system["TPR"][0][0]
         _ = __[0]
     except (KeyError, TypeError):
-        sys.stderr.write("TPR is required for NMRPCA analysis!")
+        logger.error(f"TPR is required for NMRPCA analysis ({system['ID']})!")
         return RCODE_ERROR
 
-    # Download files
-    parser.download_traj()
-    # Prepare trajectory
-    parser.prepare_traj()
-    # Concatenate trajectory
-    parser.concatenate_traj()
-    equilibration_times = {}
-    # Iterate over trajectories for different lipids
-    for lip, traj in parser.concatenated_trajs.items():
-        print(f"Main: parsing lipid {lip}")
-        # Creat PCA for trajectory
-        pca_runner = nmrpca.PCA(traj[0], traj[1], traj[2], traj[3], parser.trj_len)
-        # Run PCA
-        data = pca_runner.PCA()
-        print("Main: PCA: done")
-        # Project trajectory on PC1
-        pca_runner.get_proj(data)
-        print("Main: Projections: done")
-        # Calculate autocorrelations
-        pca_runner.get_autocorrelations()
-        print("Main: Autocorrelations: done")
-        # Estimate equilibration time
-        te2 = nmrpca.TimeEstimator(pca_runner.autocorrelation).calculate_time()
-        equilibration_times[lip] = te2 / parser.trj_len
-        print("Main: EQ time: done")
+    try:
+        # Download files
+        parser.download_traj()
+        # Prepare trajectory
+        parser.prepare_traj()
+        # Concatenate trajectory
+        parser.concatenate_traj()
+        equilibration_times = {}
+        # Iterate over trajectories for different lipids
+        for lip, traj in parser.concatenated_trajs.items():
+            print(f"Main: parsing lipid {lip}")
+            # Creat PCA for trajectory
+            pca_runner = nmrpca.PCA(traj[0], traj[1], traj[2], traj[3], parser.trj_len)
+            # Run PCA
+            data = pca_runner.PCA()
+            print("Main: PCA: done")
+            # Project trajectory on PC1
+            pca_runner.get_proj(data)
+            print("Main: Projections: done")
+            # Calculate autocorrelations
+            pca_runner.get_autocorrelations()
+            print("Main: Autocorrelations: done")
+            # Estimate equilibration time
+            te2 = nmrpca.TimeEstimator(pca_runner.autocorrelation).calculate_time()
+            equilibration_times[lip] = te2 / parser.trj_len
+            print("Main: EQ time: done")
 
-        print(te2 / parser.trj_len)
+            print(te2 / parser.trj_len)
 
-    parser.dump_data(equilibration_times)
-    gc.collect()
-    return RCODE_COMPUTED
+        parser.dump_data(equilibration_times)
+        gc.collect()
+    except Exception as e:
+        logger.error('Calculation failed for ' + system['path'])
+        logger.error(str(e))
+        logger.error(traceback.format_exc())
+        return RCODE_ERROR
+    else:
+        return RCODE_COMPUTED
 
 
 def computeAPL(  # noqa: N802 (API)
@@ -153,30 +169,36 @@ def computeAPL(  # noqa: N802 (API)
     print("Analyzing: ", path)
     print("Will write into: ", outfilename)
 
-    # calculates the total number of lipids
-    n_lipid = GetNlipids(system)
+    try:
+        # calculates the total number of lipids
+        n_lipid = GetNlipids(system)
 
-    # makes MDAnalysis universe from the system. This also downloads the data if not
-    # yet locally available
-    u = system2MDanalysisUniverse(system)
+        # makes MDAnalysis universe from the system. This also downloads the data if not
+        # yet locally available
+        u = system2MDanalysisUniverse(system)
 
-    if u is None:
-        print("Generation of MDAnalysis universe failed in folder", path)
+        if u is None:
+            print("Generation of MDAnalysis universe failed in folder", path)
+            return RCODE_ERROR
+
+        # this calculates the area per lipid as a function of time and stores it
+        # in the databank
+        apl = {}
+        for ts in tqdm(u.trajectory, desc="Scanning the trajectory"):
+            if u.trajectory.time >= system["TIMELEFTOUT"] * 1000:
+                dims = u.dimensions
+                apl_frame = dims[0] * dims[1] * 2 / n_lipid
+                apl[u.trajectory.time] = apl_frame
+
+        with open(outfilename, "w") as f:
+            json.dump(apl, f, cls=CompactJSONEncoder)
+    except Exception as e:
+        logger.error('Calculation failed for ' + system['path'])
+        logger.error(str(e))
+        logger.error(traceback.format_exc())
         return RCODE_ERROR
-
-    # this calculates the area per lipid as a function of time and stores it
-    # in the databank
-    apl = {}
-    for ts in tqdm(u.trajectory, desc="Scanning the trajectory"):
-        if u.trajectory.time >= system["TIMELEFTOUT"] * 1000:
-            dims = u.dimensions
-            apl_frame = dims[0] * dims[1] * 2 / n_lipid
-            apl[u.trajectory.time] = apl_frame
-
-    with open(outfilename, "w") as f:
-        json.dump(apl, f, cls=CompactJSONEncoder)
-
-    return RCODE_COMPUTED
+    else:
+        return RCODE_COMPUTED
 
 
 def computeTH(  # noqa: N802 (API)
@@ -209,9 +231,9 @@ def computeTH(  # noqa: N802 (API)
         with open(thick_fn, "w") as f:
             json.dump(thickness, f)
     except Exception as e:
-        print("Calculation failed for " + system["path"])
-        print(str(e))
-        print(traceback.format_exc())
+        logger.error("Calculation failed for " + system["path"])
+        logger.error(str(e))
+        logger.error(traceback.format_exc())
         return RCODE_ERROR
 
     return RCODE_COMPUTED
@@ -232,11 +254,11 @@ def computeOP(  # noqa: N802 (API)
     """
     path = system["path"]
 
+    
     # Check if order parameters are calculated or something in the system prevents
     # order parameter calculation
     for key in system["COMPOSITION"]:
         outfilename = os.path.join(NMLDB_SIMU_PATH, path, key + "OrderParameters.json")
-        # print(outfilename)
         if os.path.isfile(outfilename) or (
             "WARNINGS" in system.keys()
             and type(system["WARNINGS"]) is dict
@@ -276,8 +298,7 @@ def computeOP(  # noqa: N802 (API)
         and "GROMACS_VERSION" in system["WARNINGS"]
         and system["WARNINGS"]["GROMACS_VERSION"] == "gromacs3"
     )
-    trconv_command = "trjconv" if g3switch else "gmx trjconv"
-
+    
     cur_path = os.path.join(NMLDB_SIMU_PATH, path)
 
     try:
@@ -285,8 +306,8 @@ def computeOP(  # noqa: N802 (API)
             system, join_path=cur_path
         )
     except (ValueError, KeyError) as e:
-        sys.stderr.write("Error reading filenames from system dictionary.\n")
-        sys.stderr.write(str(type(e)) + " => " + str(e))
+        logger.error("Error reading filenames from system dictionary.\n")
+        logger.error(str(type(e)) + " => " + str(e))
         return RCODE_ERROR
 
     try:
@@ -294,23 +315,19 @@ def computeOP(  # noqa: N802 (API)
         if "gromacs" in software:
             if top_fname is None:
                 raise ValueError("TPR is required for OP calculations!")
-
             xtcwhole = os.path.join(NMLDB_SIMU_PATH, path, "whole.xtc")
             if not os.path.isfile(xtcwhole):
-                exec_str = (
-                    f"echo System | {trconv_command} -f {trj_fname} "
-                    f"-s {top_fname} -o {xtcwhole} -pbc mol -b {str(eq_time)}"
-                )
-                print("Make molecules whole in the trajectory")
-                if united_atom and system["TRAJECTORY_SIZE"] > 15e9:
-                    print(
-                        "United atom trajectry larger than 15 Gb. "
-                        "Using only every third frame to reduce memory usage."
-                    )
-                    exec_str += " -skip 3"
-                rcode = os.system(exec_str)
-                if rcode != 0:
-                    raise RuntimeError("trjconv exited with error (see above)")
+                try:
+                    echo_proc = "System\n".encode('utf-8')
+                    if g3switch:
+                        cmd_args = ['trjconv', '-f', trj_fname, '-s', top_fname, '-o', xtcwhole, '-pbc', 'mol', '-b', str(eq_time)]
+                    else:
+                        cmd_args = ['gmx', 'trjconv', '-f', trj_fname, '-s', top_fname, '-o', xtcwhole, '-pbc', 'mol', '-b', str(eq_time)]
+                    if united_atom and system["TRAJECTORY_SIZE"] > 15e9:
+                        cmd_args.extend(['-skip', '3'])
+                    subprocess.run(cmd_args, input=echo_proc, check=True)
+                except subprocess.CalledProcessError as e:
+                    raise RuntimeError("trjconv exited with error (see above)") from e
         elif "openMM" in software or "NAMD" in software:
             if not os.path.isfile(struc_fname):
                 pdb_url = resolve_download_file_url(system.get("DOI"), struc_fname)
@@ -325,25 +342,27 @@ def computeOP(  # noqa: N802 (API)
         # Calculate order parameters
         # -----------------------------------
         # united-atom switch -> engine switch
+        echo_proc = "System\n".encode('utf-8')
         if united_atom:
             if "gromacs" not in software:
                 raise ValueError("UNITED_ATOMS is supported only for GROMACS engine!")
             frame0struc = os.path.join(NMLDB_SIMU_PATH, path, "frame0.gro")
+            
             if g3switch:
-                rcode = os.system(
-                    f"echo System | editconf -f {top_fname} -o {frame0struc}"
-                )
-                if rcode != 0:
-                    raise RuntimeError("editconf exited with error (see above)")
+                try:
+                    subprocess.run(['editconf', '-f', top_fname, '-o', frame0struc], input=echo_proc, check=True)
+                except subprocess.CalledProcessError as e:
+                    raise RuntimeError("editconf exited with error (see above)") from e
             else:
-                rcode = os.system(
-                    f"echo System | {trconv_command} -f {xtcwhole}"
-                    f" -s {top_fname} -dump 0 -o {frame0struc}"
-                )
-                if rcode != 0:
+                try:
+                    if g3switch:
+                        subprocess.run(['trjconv', '-f', xtcwhole, '-s', top_fname, '-dump', '0', '-o', frame0struc], input=echo_proc, check=True)
+                    else:
+                        subprocess.run(['gmx','trjconv', '-f', xtcwhole, '-s', top_fname, '-dump', '0', '-o', frame0struc], input=echo_proc, check=True)
+                except subprocess.CalledProcessError as e:
                     raise RuntimeError(
-                        f"trjconv ({trconv_command}) exited with error (see above)"
-                    )
+                        f"trjconv ({'trjconv' if g3switch else 'gmx trjconv'}) exited with error (see above)"
+                    ) from e
 
             for key in system["UNITEDATOM_DICT"]:
                 # construct order parameter definition file for CH bonds from
@@ -351,50 +370,52 @@ def computeOP(  # noqa: N802 (API)
                 mapping_dict = system.content[key].mapping_dict
 
                 def_fname = os.path.join(NMLDB_SIMU_PATH, path, key + ".def")
-                def_file = open(def_fname, "w")
+                with open(def_fname, "w") as def_file:
+                    previous_line = ""
 
-                previous_line = ""
+                    regexp1_H = re.compile(r"M_[A-Z0-9]*C[0-9]*H[0-9]*_M")  # noqa: N806
+                    regexp2_H = re.compile(r"M_G[0-9]*H[0-9]*_M")  # noqa: N806
+                    regexp1_C = re.compile(r"M_[A-Z0-9]*C[0-9]*_M")  # noqa: N806
+                    regexp2_C = re.compile(r"M_G[0-9]_M")  # noqa: N806
 
-                regexp1_H = re.compile(r"M_[A-Z0-9]*C[0-9]*H[0-9]*_M")  # noqa: N806
-                regexp2_H = re.compile(r"M_G[0-9]*H[0-9]*_M")  # noqa: N806
-                regexp1_C = re.compile(r"M_[A-Z0-9]*C[0-9]*_M")  # noqa: N806
-                regexp2_C = re.compile(r"M_G[0-9]_M")  # noqa: N806
+                    # Note that mapping_dict's keys must be ordered
+                    # C11 H111 H112 C12 H121 H122 ...
+                    # otherwize algorithm will fail
+                    for mapping_key in mapping_dict:
+                        if (regexp1_C.search(mapping_key) or
+                                regexp2_C.search(mapping_key)):
+                            atom_c = [mapping_key,
+                                      mapping_dict[mapping_key]["ATOMNAME"]]
+                            atom_h = []
+                        elif (regexp1_H.search(mapping_key) or
+                                regexp2_H.search(mapping_key)):
+                            atom_h = [mapping_key,
+                                      mapping_dict[mapping_key]["ATOMNAME"]]
+                        else:
+                            atom_c = []
+                            atom_h = []
 
-                # Note that mapping_dict's keys must be ordered
-                # C11 H111 H112 C12 H121 H122 ...
-                # otherwize algorithm will fail
-                for mapping_key in mapping_dict:
-                    if regexp1_C.search(mapping_key) or regexp2_C.search(mapping_key):
-                        atom_c = [mapping_key, mapping_dict[mapping_key]["ATOMNAME"]]
-                        atom_h = []
-                    elif regexp1_H.search(mapping_key) or regexp2_H.search(mapping_key):
-                        atom_h = [mapping_key, mapping_dict[mapping_key]["ATOMNAME"]]
-                    else:
-                        atom_c = []
-                        atom_h = []
-
-                    if atom_h:
-                        assert atom_c
-                        items = [atom_c[1], atom_h[1], atom_c[0], atom_h[0]]
-                        def_line = (
-                            items[2]
-                            + "&"
-                            + items[3]
-                            + " "
-                            + key
-                            + " "
-                            + items[0]
-                            + " "
-                            + items[1]
-                            + "\n"
-                        )
-                        if def_line != previous_line:
-                            def_file.write(def_line)
-                            previous_line = def_line
-                def_file.close()
+                        if atom_h:
+                            assert atom_c
+                            items = [atom_c[1], atom_h[1], atom_c[0], atom_h[0]]
+                            def_line = (
+                                items[2]
+                                + "&"
+                                + items[3]
+                                + " "
+                                + key
+                                + " "
+                                + items[0]
+                                + " "
+                                + items[1]
+                                + "\n"
+                            )
+                            if def_line != previous_line:
+                                def_file.write(def_line)
+                                previous_line = def_line
 
                 # Add hydrogens to trajectory and calculate order parameters with buildH
-                op_file = os.path.join(
+                op_filepath = os.path.join(
                     NMLDB_SIMU_PATH, path, key + "OrderParameters.dat"
                 )
 
@@ -416,49 +437,51 @@ def computeOP(  # noqa: N802 (API)
                     lipid_type=system["UNITEDATOM_DICT"][key],
                     lipid_jsons=lipid_json_file,
                     traj_file=xtcwhole,
-                    out_file=f"{op_file}.buildH",
+                    out_file=f"{op_filepath}.buildH",
                     ignore_CH3s=True,
                 )
 
-                outfile = open(op_file, "w")
-                outfile.write("Atom     Average OP     OP stem\n")
+                with open(op_filepath + ".buildH") as op_file:
+                    bh_lines = op_file.readlines()
 
+                op_lines = []
                 data = {}
+                for line in bh_lines:
+                    if "#" in line:
+                        continue
+                    line2 = (
+                        line.split()[0].replace("&", " ")
+                        + "  "
+                        + line.split()[4]
+                        + "  "
+                        + line.split()[5]
+                        + " "
+                        + line.split()[6]
+                        + "\n"
+                    )
+                    op_lines.append(line2)
+
+                    op_name = line.split()[0].replace("&", " ")
+                    # -- line.split()[0] + " " + line.split()[1]
+                    op_values = [
+                        float(line.split()[4]),
+                        float(line.split()[5]),
+                        float(line.split()[6]),
+                    ]
+                    data[str(op_name)] = []
+                    data[str(op_name)].append(op_values)
+
+                # write ascii file (TODO: DO WE NEED IT?)
+                with open(op_filepath, "w") as outfile:
+                    outfile.write("Atom     Average OP     OP stem\n")
+                    outfile.writelines(op_lines)
+
+                # write json
                 outfile2 = os.path.join(
                     NMLDB_SIMU_PATH, path, key + "OrderParameters.json"
                 )
-
-                with open(op_file + ".buildH") as op_file:
-                    lines = op_file.readlines()
-                    for line in lines:
-                        if "#" in line:
-                            continue
-                        line2 = (
-                            line.split()[0].replace("&", " ")
-                            + "  "
-                            + line.split()[4]
-                            + "  "
-                            + line.split()[5]
-                            + " "
-                            + line.split()[6]
-                            + "\n"
-                        )
-                        outfile.write(line2)
-
-                        op_name = line.split()[0].replace("&", " ")
-                        # -- line.split()[0] + " " + line.split()[1]
-                        op_values = [
-                            float(line.split()[4]),
-                            float(line.split()[5]),
-                            float(line.split()[6]),
-                        ]
-                        data[str(op_name)] = []
-                        data[str(op_name)].append(op_values)
-
                 with open(outfile2, "w") as f:
                     json.dump(data, f, cls=CompactJSONEncoder)
-
-                outfile.close()
 
         # not united-atom cases
         else:
@@ -467,16 +490,15 @@ def computeOP(  # noqa: N802 (API)
 
                 print("\n Making gro file")
                 if g3switch:
-                    rcode = os.system(f"echo System | editconf -f {top_fname} -o {gro}")
-                    if rcode != 0:
-                        raise RuntimeError("editconf exited with error (see above)")
+                    try:
+                        subprocess.run(['editconf', '-f', top_fname, '-o', gro], input=echo_proc, check=True)
+                    except subprocess.CalledProcessError as e:
+                        raise RuntimeError("editconf exited with error (see above)") from e
                 else:
-                    rcode = os.system(
-                        f"echo System | gmx trjconv "
-                        f"-f {trj_fname} -s {top_fname} -dump 0 -o {gro}"
-                    )
-                    if rcode != 0:
-                        raise RuntimeError("trjconv exited with error (see above)")
+                    try:
+                        subprocess.run(['gmx', 'trjconv', '-f', trj_fname, '-s', top_fname, '-dump', '0', '-o', gro], input=echo_proc, check=True)
+                    except subprocess.CalledProcessError as e:
+                        raise RuntimeError("trjconv exited with error (see above)") from e
 
             for key in system["COMPOSITION"]:
 
@@ -560,8 +582,9 @@ def computeOP(  # noqa: N802 (API)
 def computeMAICOS(  # noqa: N802 (API)
     system: System, logger: Logger, recompute: bool = False
 ) -> int:
-    logger.info("System title: " + system['SYSTEM'])
-    logger.info("System path: " + system['path'])
+    if not is_system_suitable_4_maicos(system):
+        return RCODE_SKIPPED
+    # otherwise continue 
     software = system['SOFTWARE']
     # download trajectory and gro files
     system_path = os.path.join(NMLDB_SIMU_PATH, system['path'])
@@ -572,16 +595,16 @@ def computeMAICOS(  # noqa: N802 (API)
 
     set_maicos_files = {
         "LipidMassDensity.json",
-        "DiporderWater.json",
-        "FormFactor.json",
-        "TotalChargeDensity.json",
-        "WaterChargeDensity.json",
-        "Diporder2Water.json",
         "TotalMassDensity.json",
-        "TotalDensity.json",
         "WaterMassDensity.json",
+        "TotalDensity.json",
         "LipidDensity.json",
         "WaterDensity.json",
+        "FormFactor.json",
+        "DiporderWater.json",
+        "Diporder2Water.json",
+        "TotalChargeDensity.json",
+        "WaterChargeDensity.json",
         "LipidChargeDensity.json",
         "DielectricLipid",  # Dielectric* files are treated
         "DielectricWater",  # slightly differently (see below)
@@ -591,51 +614,14 @@ def computeMAICOS(  # noqa: N802 (API)
     for file in set_maicos_files.copy():
         if "Dielectric" in file:
             if (
-                os.path.isfile(system_path + os.sep + file + '_par.json') and
-                os.path.isfile(system_path + os.sep + file + '_per.json') and
+                os.path.isfile(os.path.join(system_path, file + '_par.json')) and
+                os.path.isfile(os.path.join(system_path, file + '_perp.json')) and
                 not recompute
             ):
                 set_maicos_files.remove(file)
         else:
-            if os.path.isfile(system_path + os.sep + file) and not recompute:
+            if os.path.isfile(os.path.join(system_path, file)) and not recompute:
                 set_maicos_files.remove(file)
-    logger.info("Files to be computed: " + "|".join(set_maicos_files))
-
-    if not set_maicos_files:
-        return RCODE_SKIPPED
-
-    if system['TYPEOFSYSTEM'] == 'miscellaneous':
-        return RCODE_SKIPPED
-
-    print('Analyzing', system_path)
-
-    try:
-        if system['UNITEDATOM_DICT']:
-            print('United atom simulation')
-    except KeyError:
-        pass
-
-    try:
-        if system['WARNINGS']['ORIENTATION']:
-            print('Skipping due to ORIENTATION warning:',
-                  system['WARNINGS']['ORIENTATION'])
-            return RCODE_SKIPPED
-    except (KeyError, TypeError):
-        pass
-
-    try:
-        if system['WARNINGS']['PBC'] == 'hexagonal-box':
-            print('Skipping due to PBC warning:', system['WARNINGS']['PBC'])
-            return RCODE_SKIPPED
-    except (KeyError, TypeError):
-        pass
-
-    try:
-        if system['WARNINGS']['NOWATER']:
-            print('Skipping because there is not water in the trajectory.')
-            return RCODE_SKIPPED
-    except (KeyError, TypeError):
-        pass
 
     try:
         struc, top, trj = get_struc_top_traj_fnames(system)
@@ -652,7 +638,22 @@ def computeMAICOS(  # noqa: N802 (API)
         logger.error("Error getting structure/topology/trajectory filenames.")
         logger.error(str(e))
         return RCODE_ERROR
+    
+    if top is None:
+        # No topology => no charge inforamtion
+        logger.info("Dielectric properties and charge densities are not accessible without topology.")
+        for file in set_maicos_files.copy():
+            if ("Dielectric" in file or "Charge" in file):
+                set_maicos_files.remove(file)
+            if ("Diporder" in file):
+                # TODO: impute charges!
+                set_maicos_files.remove(file)
 
+    if not set_maicos_files:
+        logger.info("All available MAICoS files are found. Skipping.")
+        return RCODE_SKIPPED
+    
+    logger.info("Files to be computed: " + "|".join(set_maicos_files))
     socket.setdefaulttimeout(15)
 
     try:
@@ -733,42 +734,72 @@ def computeMAICOS(  # noqa: N802 (API)
 
         # Center around one lipid tail CH3 to guarantee all lipids in the same box
         if 'gromacs' in system['SOFTWARE']:
-
-            trjconv_cmd = 'gmx trjconv'
-            makendx_cmd = 'gmx make_ndx'
-
-            os.system('rm foo.ndx')
-            os.system(f'echo "a {last_atom}\nq" | {makendx_cmd} -f {tpr_name} '
-                      f'-o foo.ndx')
-            os.system("tail -n1 foo.ndx | awk '{print $NF}'")
-            os.system('echo "[ centralAtom ]" >> foo.ndx')
-            os.system("tail -n2 foo.ndx | head -n1 |  awk '{print $NF}' >> foo.ndx")
-
+            ndxpath = os.path.join(system_path, 'foo.ndx')
+            try:
+                echo_input = f"a {last_atom}\nq\n".encode('utf-8')
+                subprocess.run(['gmx', 'make_ndx', '-f', tpr_name, '-o', ndxpath], input=echo_input, check=True)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Subprocess failed during ndx file creation: {e}") from e
+            try:
+                with open(ndxpath, 'r') as f:
+                    last_lines = deque(f,1)
+                last_atom_id = int(re.split(r'\s+', last_lines[0].strip())[-1])
+                with open(ndxpath, 'a') as f:
+                    f.write('[ centralAtom ]\n')
+                    f.write(f'{last_atom_id}\n')
+            except Exception as e:
+                raise RuntimeError(f"Some error occurred while reading the foo.ndx {ndxpath}: {e}") from e
             xtcwhole = os.path.join(system_path, 'whole.xtc')
             xtcfoo = os.path.join(system_path, 'foo2.xtc')
             xtccentered = os.path.join(system_path, 'centered.xtc')
             if (not os.path.isfile(xtccentered)):
                 print("Make molecules whole in the trajectory")
                 if not os.path.isfile(xtcwhole):
-                    os.system(f'echo System |  {trjconv_cmd} -f {trj_name} '
-                              f'-s {tpr_name} -o {xtcwhole} -pbc mol -b {str(eq_time)}')
+                    try:
+                        echo_proc = "System\n".encode('utf-8')
+                        subprocess.run([
+                            'gmx','trjconv',
+                            '-f', trj_name,
+                            '-s', tpr_name,
+                            '-o', xtcwhole,
+                            '-pbc', 'mol',
+                            '-b', str(eq_time)], input=echo_proc, check=True)
+                    except subprocess.CalledProcessError as e:
+                        raise RuntimeError(f"trjconv for whole failed: {e}") from e
 
                 if (not os.path.isfile(xtcfoo)):
-                    os.system(f'echo "centralAtom\nSystem" |  {trjconv_cmd} -center'
-                              f' -pbc mol -n foo.ndx -f {xtcwhole} -s {tpr_name}'
-                              f' -o {xtcfoo}')
+                    try:
+                        echo_input = "centralAtom\nSystem".encode('utf-8')
+                        subprocess.run([
+                            'gmx','trjconv', 
+                            '-center', 
+                            '-pbc', 'mol', 
+                            '-n', ndxpath, 
+                            '-f', xtcwhole, 
+                            '-s', tpr_name, 
+                            '-o', xtcfoo], input=echo_input, check=True)
+                    except subprocess.CalledProcessError as e:
+                        raise RuntimeError(f"trjconv for center failed: {e}") from e
 
-                os.system('rm foo.ndx')
-                os.system('rm ' + xtcwhole)
+                try:
+                    os.remove(ndxpath)
+                    os.remove(xtcwhole)
+                except subprocess.CalledProcessError as e:
+                    raise RuntimeError(f"Failed to remove temporary files: {e}") from e
 
                 # Center around the center of mass of all the g_3 carbons
-                # if (not os.path.isfile(xtccentered)):
-                os.system(f'echo "a {g3_atom}\nq" | {makendx_cmd}'
-                          f' -f {tpr_name} -o foo.ndx')
-                os.system(f'echo "{g3_atom}\nSystem" |  {trjconv_cmd} -center'
-                          f' -pbc mol -n foo.ndx -f {xtcfoo} -s {tpr_name}'
-                          f' -o {xtccentered}')
-                os.system('rm ' + xtcfoo)
+                try:
+                    echo_input = f"a {g3_atom}\nq\n".encode('utf-8')
+                    subprocess.run(['gmx','make_ndx', '-f', tpr_name, '-o', ndxpath], input=echo_input, check=True)
+                    echo_input = f"{g3_atom}\nSystem".encode('utf-8')
+                    subprocess.run(['gmx','trjconv', '-center', '-pbc', 'mol', '-n', ndxpath, '-f', xtcfoo, '-s', tpr_name, '-o', xtccentered], input=echo_input, check=True)
+                    os.remove(xtcfoo)
+                except subprocess.CalledProcessError as e:
+                    raise RuntimeError(f"Failed during centering on g3 carbons: {e}") from e
+            try:
+                os.remove(ndxpath)   
+            except Exception as e:
+                raise RuntimeError(f"Some error occurred during removing the {ndxpath}:{e}")
         else:
             print("Centering for other than Gromacs may not work if there are"
                   " jumps over periodic boundary conditions in z-direction.")
@@ -781,7 +812,7 @@ def computeMAICOS(  # noqa: N802 (API)
         # -- PHILIP code starts here --
         # We us a hardoced bin width
         bin_width = 0.3
-        
+
         # introduce elements attribute (if it's empty)
         # and make initial guess (just in case)
         u.guess_TopologyAttrs(force_guess=["elements"])
@@ -809,7 +840,7 @@ def computeMAICOS(  # noqa: N802 (API)
         zlim = {"zmin": zmin, "zmax": zmax}
         dens_options = {**zlim, **base_options}
 
-        prfx = os.path.join(NMLDB_SIMU_PATH, system['path']) + os.sep
+        spath = os.path.join(NMLDB_SIMU_PATH, system['path'])
 
         request_analysis = dict()
 
@@ -819,25 +850,25 @@ def computeMAICOS(  # noqa: N802 (API)
                 u.atoms,
                 dens="electron",
                 **dens_options,
-                output=prfx + "TotalDensity.json",
+                output=os.path.join(spath, "TotalDensity.json"),
             )
             request_analysis["TotalDensity.json"] = dens_e_total
-        
+
         if "WaterDensity.json" in set_maicos_files:
             dens_e_water = DensityPlanar(
                 water,
                 dens="electron",
                 **dens_options,
-                output=prfx + "WaterDensity.json",
+                output=os.path.join(spath, "WaterDensity.json"),
             )
             request_analysis["WaterDensity.json"] = dens_e_water
-        
+
         if "LipidDensity.json" in set_maicos_files:
             dens_e_lipid = DensityPlanar(
                 lipid,
                 dens="electron",
                 **dens_options,
-                output=prfx + "LipidDensity.json",
+                output=os.path.join(spath, "LipidDensity.json"),
             )
             request_analysis["LipidDensity.json"] = dens_e_lipid
 
@@ -846,25 +877,25 @@ def computeMAICOS(  # noqa: N802 (API)
                 u.atoms,
                 dens="mass",
                 **dens_options,
-                output=prfx + "TotalMassDensity.json",
+                output=os.path.join(spath, "TotalMassDensity.json"),
             )
             request_analysis["TotalMassDensity.json"] = dens_m_total
-        
+
         if "WaterMassDensity.json" in set_maicos_files:
             dens_m_water = DensityPlanar(
                 water,
                 dens="mass",
                 **dens_options,
-                output=prfx + "WaterMassDensity.json",
+                output=os.path.join(spath, "WaterMassDensity.json"),
             )
             request_analysis["WaterMassDensity.json"] = dens_m_water
-        
+
         if "LipidMassDensity.json" in set_maicos_files:
             dens_m_lipid = DensityPlanar(
                 lipid,
                 dens="mass",
                 **dens_options,
-                output=prfx + "LipidMassDensity.json",
+                output=os.path.join(spath, "LipidMassDensity.json"),
             )
             request_analysis["LipidMassDensity.json"] = dens_m_lipid
 
@@ -873,25 +904,25 @@ def computeMAICOS(  # noqa: N802 (API)
                 u.atoms,
                 dens="charge",
                 **dens_options,
-                output=prfx + "TotalChargeDensity.json",
+                output=os.path.join(spath, "TotalChargeDensity.json"),
             )
             request_analysis["TotalChargeDensity.json"] = dens_c_total
-        
+
         if "WaterChargeDensity.json" in set_maicos_files:
             dens_c_water = DensityPlanar(
                 water,
                 dens="charge",
                 **dens_options,
-                output=prfx + "WaterChargeDensity.json",
+                output=os.path.join(spath, "WaterChargeDensity.json"),
             )
             request_analysis["WaterChargeDensity.json"] = dens_c_water
-        
+
         if "LipidChargeDensity.json" in set_maicos_files:
             dens_c_lipid = DensityPlanar(
                 lipid,
                 dens="charge",
                 **dens_options,
-                output=prfx + "LipidChargeDensity.json",
+                output=os.path.join(spath, "LipidChargeDensity.json"),
             )
             request_analysis["LipidChargeDensity.json"] = dens_c_lipid
 
@@ -904,7 +935,7 @@ def computeMAICOS(  # noqa: N802 (API)
                 **base_options,
                 zmin=None,
                 zmax=None,
-                output=prfx + "FormFactor.json",
+                output=os.path.join(spath, "FormFactor.json"),
             )
             request_analysis["FormFactor.json"] = form_factor
 
@@ -915,7 +946,7 @@ def computeMAICOS(  # noqa: N802 (API)
                 water,
                 order_parameter="cos_theta",
                 **dens_options,
-                output=prfx + "DiporderWater.json",
+                output=os.path.join(spath, "DiporderWater.json"),
             )
             request_analysis["DiporderWater.json"] = cos_water
 
@@ -924,26 +955,29 @@ def computeMAICOS(  # noqa: N802 (API)
                 water,
                 order_parameter="cos_2_theta",
                 **dens_options,
-                output=prfx + "Diporder2Water.json",
+                output=os.path.join(spath, "Diporder2Water.json"),
             )
             request_analysis["Diporder2Water.json"] = cos2_water
 
         # Dielectric profiles
         if "DielectricTotal" in set_maicos_files:
             diel_total = DielectricPlanar(
-                u.atoms, **base_options, output_prefix=prfx + "DielectricTotal"
+                u.atoms, **base_options,
+                output_prefix=os.path.join(spath, "DielectricTotal")
             )
             request_analysis["DielectricTotal"] = diel_total
 
         if "DielectricWater" in set_maicos_files:
             diel_water = DielectricPlanar(
-                water, **base_options, output_prefix=prfx + "DielectricWater"
+                water, **base_options,
+                output_prefix=os.path.join(spath, "DielectricWater")
             )
             request_analysis["DielectricWater"] = diel_water
-        
+
         if "DielectricLipid" in set_maicos_files:
             diel_lipid = DielectricPlanar(
-                lipid, **base_options, output_prefix=prfx + "DielectricLipid"
+                lipid, **base_options,
+                output_prefix=os.path.join(spath, "DielectricLipid")
             )
             request_analysis["DielectricLipid"] = diel_lipid
 
@@ -959,8 +993,12 @@ def computeMAICOS(  # noqa: N802 (API)
                 print(f"Dielectric profiles not available for this system: {e}")
                 # create stub json-s to avoid recompute tries
                 for dfile in ["DielectricTotal", "DielectricWater", "DielectricLipid"]:
-                    open(system_path + os.sep + dfile + '_per.json', 'w').write('{}')
-                    open(system_path + os.sep + dfile + '_par.json', 'w').write('{}')
+                    with open(os.path.join(
+                            system_path, dfile + '_per.json'), 'w') as f:
+                        f.write('{}')
+                    with open(os.path.join(
+                            system_path, dfile + '_par.json'), 'w') as f:
+                        f.write('{}')
                     logger.info(f"Created empty dielectric profile JSONs for {dfile}.")
                 try:
                     del request_analysis["DielectricTotal"]
@@ -979,9 +1017,9 @@ def computeMAICOS(  # noqa: N802 (API)
 
     # finall catch
     except Exception as e:
-        print('Calculation failed for ' + system['path'])
-        print(str(e))
-        print(traceback.format_exc())
+        logger.error('Calculation failed for ' + system['path'])
+        logger.error(str(e))
+        logger.error(traceback.format_exc())
         return RCODE_ERROR
     else:
         return RCODE_COMPUTED

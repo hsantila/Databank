@@ -28,14 +28,17 @@ def uname2element(mapping_name: str):
 
     if name2 == "G":  # G is a glycerol carbon so change G to C
         name2 = "C"
+    elif name2 == "X":  # X is a placeholder for unknown element, we use 'X' as element name
+        name2 = "Dummy"  # Dummy is used for unknown elements in MDAnalysis
+        return name2
 
     try:
         _ = getattr(periodictable, name2).number
     except AttributeError as e:
         raise KeyError(
             "This mapping name cannot be read by our rules: {mapping_name}") from e
-
-    return name2
+    else:
+        return name2
 
 
 def guess_elements(system: System, u: mda.Universe) -> None:
@@ -61,7 +64,7 @@ def guess_elements(system: System, u: mda.Universe) -> None:
                 system["UNITEDATOM_DICT"][_mol]+".json")
             with open(ua_dict_f, 'r') as f:
                 ua_dict = json.load(f)
-        except KeyError:
+        except (KeyError, TypeError):
             ua_dict = False
 
         for uname, props in mol.mapping_dict.items():
