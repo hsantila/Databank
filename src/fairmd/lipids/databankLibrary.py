@@ -126,7 +126,7 @@ def GetOP(system): # noqa: N802 (API name)
             if mol not in lipids_set:
                         continue
             fname = os.path.join(
-                        NMLDB_SIMU_PATH,
+                        FMDL_SIMU_PATH,
                         system["path"],
                         mol + "OrderParameters.json",
                     )
@@ -137,7 +137,7 @@ def GetOP(system): # noqa: N802 (API name)
             except FileNotFoundError:
                     missingName=mol + "OrderParameters.json"
                     warnings.warn(f"{missingName} not found for {system['ID']}")
-                    print("filemissing")
+                   
                     OPdata = None   
                     
             SimOPdata[mol] = OPdata
