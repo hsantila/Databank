@@ -112,7 +112,7 @@ def GetEquilibrationTimes(system: System):  # noqa: N802 (API name)
 
     return eq_time_dict
 
-def GetOP(system) # noqa: N802 (API name)
+def GetOP(system): # noqa: N802 (API name)
     """
     Returns a dictionary containing the order parameter data time for each lipid in the 
     ``system``, stored in ``LipidNameOrderParameters.json`` files.
