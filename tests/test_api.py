@@ -388,7 +388,7 @@ def test_GetEquilibrationTimes_fail(systems):
         (281, "POPC"),
     ],
 )
-def test_GetOP_reads_valid_json(systemid, lipid):
+def test_GetOP_reads_valid_json(systems,systemid, lipid):
     from fairmd.lipids.databankLibrary import GetOP
     sys0 = systems.loc(systemid)
     resdic = databankLibrary.GetOP(sys0)
