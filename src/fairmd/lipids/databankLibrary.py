@@ -112,9 +112,10 @@ def GetEquilibrationTimes(system: System):  # noqa: N802 (API name)
 
     return eq_time_dict
 
-def GetOP(system): # noqa: N802 (API name)
+
+def GetOP(system):  # noqa: N802 (API name)
     """
-    Returns a dictionary containing the order parameter data time for each lipid in the 
+    Returns a dictionary containing the order parameter data time for each lipid in the
     ``system``, stored in ``LipidNameOrderParameters.json`` files.
 
     :param system: NMRlipids databank dictionary defining a simulation.
@@ -123,25 +124,26 @@ def GetOP(system): # noqa: N802 (API name)
     """
     SimOPdata = {}  # order parameter data for each type of lipid
     for mol in system["COMPOSITION"]:
-            if mol not in lipids_set:
-                        continue
-            fname = os.path.join(
-                        FMDL_SIMU_PATH,
-                        system["path"],
-                        mol + "OrderParameters.json",
-                    )
-            OPdata = {}
-            try:
-                with open(fname) as json_file:
-                    OPdata = json.load(json_file)
-            except FileNotFoundError:
-                    missingName=mol + "OrderParameters.json"
-                    warnings.warn(f"{missingName} not found for {system['ID']}")
-                   
-                    OPdata = None   
-                    
-            SimOPdata[mol] = OPdata
+        if mol not in lipids_set:
+            continue
+        fname = os.path.join(
+            FMDL_SIMU_PATH,
+            system["path"],
+            mol + "OrderParameters.json",
+        )
+        OPdata = {}
+        try:
+            with open(fname) as json_file:
+                OPdata = json.load(json_file)
+        except FileNotFoundError:
+            missingName = mol + "OrderParameters.json"
+            warnings.warn(f"{missingName} not found for {system['ID']}")
+
+            OPdata = None
+
+        SimOPdata[mol] = OPdata
     return SimOPdata
+
 
 def GetNlipids(system: System):  # noqa: N802 (API name)
     """

@@ -380,7 +380,8 @@ def test_GetEquilibrationTimes_fail(systems):
     from fairmd.lipids.databankLibrary import GetEquilibrationTimes
 
     GetEquilibrationTimes(sys0)
-      
+
+
 # Test that a valid JSON file is read correctly, left out full comparison of the OP-dictionary
 @pytest.mark.parametrize(
     "systemid, lipid",
@@ -388,8 +389,9 @@ def test_GetEquilibrationTimes_fail(systems):
         (281, "POPC"),
     ],
 )
-def test_GetOP_reads_valid_json(systems,systemid, lipid):
+def test_GetOP_reads_valid_json(systems, systemid, lipid):
     from fairmd.lipids.databankLibrary import GetOP
+
     sys0 = systems.loc(systemid)
     resdic = GetOP(sys0)
 
