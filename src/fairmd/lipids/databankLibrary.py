@@ -120,7 +120,8 @@ def GetOP(system):  # noqa: N802 (API name)
 
     :param system: NMRlipids databank dictionary defining a simulation.
 
-    :return: dictionary contaning, for each lipid, the order parameter data: average OP, standard deviation, and standard error of mean. Contains None if ``LipidNameOrderParameters.json`` missing.
+    :return: dictionary contaning, for each lipid, the order parameter data: average OP, standard deviation,
+     and standard error of mean. Contains None if ``LipidNameOrderParameters.json`` missing.
     """
     SimOPdata = {}  # order parameter data for each type of lipid
     for mol in system["COMPOSITION"]:
@@ -137,7 +138,7 @@ def GetOP(system):  # noqa: N802 (API name)
                 OPdata = json.load(json_file)
         except FileNotFoundError:
             missingName = mol + "OrderParameters.json"
-            warnings.warn(f"{missingName} not found for {system['ID']}")
+            warnings.warn(f"{missingName} not found for {system['ID']}", stacklevel=2)
 
             OPdata = None
 
