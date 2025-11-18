@@ -7,15 +7,44 @@ There is a dictionary of lipids, ions, etc. If you add a lipid which is not yet
 in the databank, you have to add it here!
 """
 
+import fnmatch
 import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import MutableSet
 from typing import Any
 
+import MDAnalysis as mda
 import yaml
 
 from fairmd.lipids import FMDL_MOL_PATH
+
+
+class MoleculeError(Exception):
+    """
+    Custom exception for molecule-related errors.
+
+    @param message: Error message describing the issue.
+    @param mol: Optional Molecule object related to the error.
+    """
+
+    def __init__(self, message: str, mol=None) -> None:
+        msg = f"From molecule {mol}: {message}" if mol is not None else message
+        self._mol = mol
+        super().__init__(msg)
+
+
+class MoleculeMappingError(MoleculeError):
+    """Custom exception for molecule mapping errors."""
+
+    def __init__(self, message: str, mol=None) -> None:
+        if mol is None:
+            msg = message
+        elif mol.mapping_file is None:
+            msg = f"From {mol}: {message}"
+        else:
+            msg = f"From {mol}[{mol.mapping_file}]: {message}" if mol is not None else message
+        super().__init__(msg, mol=mol)
 
 
 class Molecule(ABC):
@@ -45,16 +74,76 @@ class Molecule(ABC):
         :param fname: mapping filename (without path)
         :return:
         """
+        self._disp_mapping = fname
         self._mapping_fpath = os.path.join(self._get_path(), fname)
-        assert os.path.isfile(self._mapping_fpath)
+        if not os.path.isfile(self._mapping_fpath):
+            msg = f"Cannot find '{self._mapping_fpath}' mapping for molecule {self.name}"
+            raise FileNotFoundError(msg)
+
+    def check_mapping(self, u: mda.Universe, name: str) -> bool:
+        """Check consistency of mapping file against Universe.
+
+        :param u: MDAnalysis Universe
+        :param name: string standing for residue name if it is not in the mapping file
+
+        :raises MoleculeMappingError: if mapping is inconsistent
+        """
+        res_set = {v["RESIDUE"] for _, v in self.mapping_dict.items() if v.get("RESIDUE") is not None}
+        res_set.add(name)
+        res_atoms = u.select_atoms("resname " + " ".join(res_set))
+        for a in res_atoms:
+            _ = self.md2uan(a.name)
+        for unm in self.mapping_dict:
+            sel_str = self.uan2selection(unm, name)
+            ats: mda.AtomGroup = u.select_atoms(sel_str)
+            if ats.n_atoms == 0:
+                msg = f"Atom {unm} was not found in the universe using selection '{sel_str}'."
+                if name in sel_str:
+                    msg += f" Could be mapping error or incorrect residue name '{name}'."
+                raise MoleculeMappingError(msg, mol=self)
 
     @property
     def mapping_dict(self) -> dict:
-        # preload on first call
+        """Return mapping dictionary (load on first call)"""
         if self._mapping_dict is None:
             with open(self._mapping_fpath) as yaml_file:
-                self._mapping_dict = yaml.load(yaml_file, Loader=yaml.FullLoader)
+                self._mapping_dict = yaml.safe_load(yaml_file)  # yaml.load(yaml_file, Loader=yaml.FullLoader)
         return self._mapping_dict
+
+    def md2uan(self, mdatomname: str, mdresname: str | None = None) -> str:
+        """
+        Convert MD atom name to the Universal Atom Name.
+
+        :raises MoleculeMappingError: if the md atom name is not found in the mapping.
+        :return: Universal Atom Name (str)
+        """
+        for universal_name, mrecord in self.mapping_dict.items():
+            mapping_aname = mrecord["ATOMNAME"]
+            # MDAnalysis uses fnmatch patterns for selection language
+            # https://userguide.mdanalysis.org/stable/selections.html
+            if "RESIDUE" in mrecord and mdresname is not None:
+                mapping_rname = mrecord["RESIDUE"]
+                if not fnmatch.fnmatch(mdresname, mapping_rname):
+                    continue
+            if fnmatch.fnmatch(mdatomname, mapping_aname):
+                return universal_name
+        emsg = f"Atom {mdatomname} is not found."
+        raise MoleculeMappingError(emsg, mol=self)
+
+    def uan2selection(self, uname: str, resname: str) -> str:
+        """
+        Convert the Universal Atom Name to MD atom name.
+
+        :raises KeyError: if the universal name is not found in the mapping.
+        :return: selection string for MDAnalysis
+        """
+        anm = self.mapping_dict[uname]["ATOMNAME"]
+        selstr = f"name {anm}"
+        if "RESIDUE" in self.mapping_dict[uname]:
+            selstr += " and resname " + self.mapping_dict[uname]["RESIDUE"]
+        else:
+            selstr += " and resname " + resname
+        return selstr
 
     def __init__(self, name: str) -> None:
         """
@@ -65,6 +154,7 @@ class Molecule(ABC):
         """
         self.__check_name(name)
         self._molname = name
+        self._disp_mapping = None
         self._mapping_fpath = None
         self._mapping_dict = None
 
@@ -80,11 +170,12 @@ class Molecule(ABC):
 
         :param name: A string representing the name to validate.
 
-        :raises ValueError: If the name contains characters outside of the allowed set.
+        :raises MoleculeError: If the name contains characters outside of the allowed set.
         """
         pat = r"[A-Za-z0-9_]+"
         if not re.match(pat, name):
-            raise ValueError(f"Only {pat} symbols are allowed in Molecule name.")
+            msg = f"Only {pat} symbols are allowed in Molecule name."
+            raise MoleculeError(msg)
 
     @abstractmethod
     def _populate_meta_data(self) -> None:
@@ -105,23 +196,29 @@ class Molecule(ABC):
         """Molecule name"""
         return self._molname
 
+    @property
+    def mapping_file(self) -> str:
+        """Mapping file name"""
+        return self._disp_mapping
+
     # comparison by name to behave in a set
     # It's case-insesitive as folder structure should work on mac/win
 
     def __eq__(self, other) -> bool:
         return isinstance(other, type(self)) and self.name.upper() == other.name.upper()
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash(self.name.upper())
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{type(self).__name__}({self.name})"
 
 
 class Lipid(Molecule):
     """
-    Lipid class inherited from Molecule base. Contains all the molecules
-    which belongs to the bilayer.
+    Lipid class inherited from :class:`Molecule` base.
+
+    Is used for all the molecules located in the bilayer.
     """
 
     _lipids_dir: str = os.path.join(FMDL_MOL_PATH, "membrane")
@@ -138,7 +235,8 @@ class Lipid(Molecule):
             with open(meta_path) as yaml_file:
                 self._metadata = yaml.load(yaml_file, Loader=yaml.FullLoader)
         else:
-            raise FileNotFoundError(f"Metadata file not found for {self.name}.")
+            msg = f"Metadata file not found for {self.name}."
+            raise FileNotFoundError(msg)
 
     @property
     def metadata(self) -> dict:
@@ -207,7 +305,7 @@ class MoleculeSet(MutableSet[Molecule], ABC):
         :return: constructed Molecule
         """
 
-    def __contains__(self, item: Molecule):
+    def __contains__(self, item: Molecule) -> bool:
         """Check if a lipid is in the set."""
         return (self._test_item_type(item) and item in self._items) or (
             isinstance(item, str) and item.upper() in self._names
@@ -216,10 +314,10 @@ class MoleculeSet(MutableSet[Molecule], ABC):
     def __iter__(self):
         return iter(self._items)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._items)
 
-    def add(self, item: Molecule):
+    def add(self, item) -> None:
         """
         Add a lipid to the set.
 
@@ -233,12 +331,11 @@ class MoleculeSet(MutableSet[Molecule], ABC):
             self._items.add(self._create_item(item))  # here we call Lipid constructor
             self._names.add(item.upper())
         else:
-            raise TypeError(f"Only proper instances can be added to {type(self).__name__}.")
+            msg = f"Only proper instances can be added to {type(self).__name__}."
+            raise TypeError(msg)
 
-    def discard(self, item):
-        """
-        Remove a lipid from the set without raising an error if it does not exist.
-        """
+    def discard(self, item) -> None:
+        """Remove a lipid from the set without raising an error if it does not exist."""
         if self._test_item_type(item):
             self._items.discard(item)
             self._names.discard(item.name.toupper())
@@ -250,13 +347,16 @@ class MoleculeSet(MutableSet[Molecule], ABC):
                 if i.name.upper() == item.upper():
                     ifound = i
                     break
-            assert ifound is not None
+            if ifound is None:
+                msg = f"Item '{item}' not found in the set."
+                raise MoleculeError(msg)
             self._items.discard(ifound)
             self._names.discard(item.upper())
 
     def get(self, key: str, default=None) -> Molecule | None:
         """
         Get a molecule by its name.
+
         :param key: The name of the molecule to retrieve.
         :param default: The value to return if the molecule is not found.
         """
@@ -266,11 +366,12 @@ class MoleculeSet(MutableSet[Molecule], ABC):
                     return item
         return default
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{type(self).__name__}[{self._names}]"
 
     @property
     def names(self) -> set[str]:
+        """Set of molecule names in the set."""
         return self._names
 
 
@@ -280,13 +381,13 @@ class LipidSet(MoleculeSet):
     def _test_item_type(self, item: Any) -> bool:
         return isinstance(item, Lipid)
 
-    def _create_item(self, name):
+    def _create_item(self, name: str) -> Molecule:
         return Lipid(name)
 
     @staticmethod
-    def load_from_data():
+    def load_from_data() -> "LipidSet":
         """
-        Loads lipid data from the designated directory and returns a set of lipids.
+        Load lipid data from the designated directory and returns a set of lipids.
 
         :rtype: LipidSet
         :return: An instance of loaded `LipidSet`.
@@ -300,20 +401,18 @@ class LipidSet(MoleculeSet):
 
 
 class NonLipidSet(MoleculeSet):
-    """
-    MoleculeSet specialization for NonLipid.
-    """
+    """MoleculeSet specialization for NonLipid."""
 
     def _test_item_type(self, item: Any) -> bool:
         return isinstance(item, NonLipid)
 
-    def _create_item(self, name):
+    def _create_item(self, name: str) -> Molecule:
         return NonLipid(name)
 
     @staticmethod
-    def load_from_data():
+    def load_from_data() -> "NonLipidSet":
         """
-        Loads Nonlipid data from the designated directory and returns a set of lipids.
+        Load Nonlipid data from the designated directory and returns a set of lipids.
 
         :rtype: NonLipidSet
         :return: An instance of loaded `NonLipidSet`.

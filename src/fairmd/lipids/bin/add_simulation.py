@@ -11,13 +11,17 @@ The script adds a simulation into the Databank based on ``info.yaml`` file.
 -f FILE, --file=FILE   Input config file in yaml format.
 -d, --debug            Enable debug logging output
 -n, --no-cache         Always redownload repository files
--w WORK_DIR, --work-dir=WORK_DIR  Set custom temporary working directory \
-        [not set = read from YAML]
+-w WORK_DIR, --work-dir=WORK_DIR  Set custom temporary working directory
+                                  [not set = read from YAML]
+--dru-run              Download only 50MB of big files. Very usefull when
+                       user is testing the addition.
+--non-interactive      Answer N to all interactive questions. Exit if meet
+                       any uncertainty
 
 **Returns** error codes:
 
 - 0 - success
-- 1 - input YAML parsing errors
+- 1 - input errors (YAML parsing, mapping files, etc.)
 - 2 - filesystem writting errors
 - 3 - network accessing errors
 
@@ -55,7 +59,7 @@ from fairmd.lipids.databankio import (
 from fairmd.lipids.databankLibrary import lipids_set, molecules_set, parse_valid_config_settings
 from fairmd.lipids.SchemaValidation.ValidateYAML import validate_info_dict
 from fairmd.lipids.settings.engines import get_struc_top_traj_fnames, software_dict
-from fairmd.lipids.settings.molecules import Lipid, NonLipid
+from fairmd.lipids.settings.molecules import Lipid, MoleculeMappingError, NonLipid
 
 pd.set_option("display.max_rows", 500)
 pd.set_option("display.max_columns", 500)
@@ -116,6 +120,7 @@ Returns error codes:
         help="perform a dry-run download of the files with 50MB limit",
         action="store_true",
     )
+    parser.add_argument("--non-interactive", help="answer N automatically to console questions", action="store_true")
 
     args = parser.parse_args()
 
@@ -257,10 +262,9 @@ Returns error codes:
         except KeyError:
             if key_sim in ["SOFTWARE", "ID"]:
                 continue
-            else:
-                # That shouldn't happen! Unexpected YAML-keys were checked by
-                # parse_valid_config_settings before
-                raise
+            # That shouldn't happen! Unexpected YAML-keys were checked by
+            # parse_valid_config_settings before
+            raise
 
         if "file" in entry_type:
             files_list = []
@@ -370,8 +374,8 @@ Returns error codes:
         try:
             subprocess.run(command, input="System\n", text=True, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
-            FAIL_MSG = f"Command 'echo System | {' '.join(command)}' failed with error: {e.stderr}"
-            raise RuntimeError(FAIL_MSG) from e
+            msg = f"Command 'echo System | {' '.join(command)}' failed with error: {e.stderr}"
+            raise RuntimeError(msg) from e
         try:
             u = Universe(gro, traj)
             # write first frame into gro file
@@ -418,7 +422,8 @@ Returns error codes:
             lipids.append(u0.select_atoms(selection))
 
     if not lipids:
-        raise RuntimeError("No lipids were found in the composition!")
+        msg = "No lipids were found in the composition!"
+        raise RuntimeError(msg)
     # join all the selected the lipids together to make a selection of the entire
     # membrane and calculate the z component of the centre of mass of
     # the membrane
@@ -441,20 +446,11 @@ Returns error codes:
             lip = Lipid(key_mol)
             m_file = sim["COMPOSITION"][key_mol]["MAPPING"]
             lip.register_mapping(m_file)
-            for key in lip.mapping_dict:
-                if "RESIDUE" in lip.mapping_dict[key]:
-                    selection = (
-                        selection
-                        + "resname "
-                        + lip.mapping_dict[key]["RESIDUE"]
-                        + " and name "
-                        + lip.mapping_dict[key]["ATOMNAME"]
-                        + " or "
-                    )
-                    break
-                else:
-                    selection = "resname " + sim["COMPOSITION"][key_mol]["NAME"]
-                    break
+            val = next(iter(lip.mapping_dict.values()))
+            if "RESIDUE" in val:
+                selection = selection + "resname " + val["RESIDUE"] + " and name " + val["ATOMNAME"] + " or "
+            else:
+                selection = "resname " + sim["COMPOSITION"][key_mol]["NAME"]
 
         # if lipid was found then selection is not empty
         if selection != "":
@@ -524,21 +520,21 @@ Returns error codes:
             and sim["WARNINGS"]["GROMACS_VERSION"] == "gromacs3"
         ):
             command = ["gmxdump", "-s", top]
-            TemperatureKey = "ref_t"
+            temperature_key = "ref_t"
         else:
             command = ["gmx", "dump", "-s", top]
-            TemperatureKey = "ref-t"
+            temperature_key = "ref-t"
         try:
             result = subprocess.run(command, input="System\n", text=True, check=True, capture_output=True)
             with open(file1, "w") as f:
                 f.write(result.stdout)
         except subprocess.CalledProcessError as e:
-            FAIL_MSG = f"Command 'echo System | {' '.join(command)}' failed with error: {e.stderr}"
-            raise RuntimeError(FAIL_MSG) from e
+            msg = f"Command 'echo System | {' '.join(command)}' failed with error: {e.stderr}"
+            raise RuntimeError(msg) from e
 
         with open(file1) as tpr_info:
             for line in tpr_info:
-                if TemperatureKey in line:
+                if temperature_key in line:
                     sim["TEMPERATURE"] = float(line.split()[1])
 
     logger.info("Parameters read from input files:")
@@ -550,9 +546,18 @@ Returns error codes:
     natoms_trj = u.atoms.n_atoms
 
     number_of_atoms = 0
-    for key_mol in sim["COMPOSITION"]:
+    for key_mol, comp_mol in sim["COMPOSITION"].items():
         mol = Lipid(key_mol) if key_mol in lipids_set else NonLipid(key_mol)
-        mol.register_mapping(sim["COMPOSITION"][key_mol]["MAPPING"])
+        map_file = comp_mol["MAPPING"]
+        mol.register_mapping(map_file)
+        try:
+            mol.check_mapping(u, comp_mol["NAME"])
+        except MoleculeMappingError as e:
+            msg = f"Your mapping file '{map_file}' contains mistakes."
+            raise RuntimeError(msg) from e
+        except Exception as e:
+            msg = f"Unknown exception during mapping-file checking '{map_file}'."
+            raise RuntimeError(msg) from e
 
         if sim.get("UNITEDATOM_DICT") and "SOL" not in key_mol:
             mapping_file_length = 0
@@ -560,8 +565,7 @@ Returns error codes:
             for key in mol.mapping_dict:
                 if "H" in key:
                     continue
-                else:
-                    mapping_file_length += 1
+                mapping_file_length += 1
 
         else:
             mapping_file_length = len(mol.mapping_dict)
@@ -569,14 +573,22 @@ Returns error codes:
         number_of_atoms += np.sum(sim["COMPOSITION"][key_mol]["COUNT"]) * mapping_file_length
 
     if number_of_atoms != natoms_trj:
-        stop = input(
+        msg = (
             f"Number of atoms in trajectory {natoms_trj} and README.yaml "
             f"{number_of_atoms} do no match. Check the mapping files and molecule"
-            f" names. {os.linesep} If you know what you are doing, you can still "
-            "continue the running the script. Do you want to (y/n)?",
+            f" names."
         )
+        if args.non_interactive:
+            logger.error(msg)
+            stop = "n"
+        else:
+            msg += (
+                "If you know what you are doing, you can still continue the running the script. Do you want to (y/n)? "
+            )
+            stop = input(msg)
         if stop == "n":
-            os._exit("Interrupted because atomnumbers did not match")
+            msg = "Number of atoms do not match"
+            raise RuntimeError(msg)
         if stop == "y":
             logger.warning(
                 "Progressed even thought that atom numbers did not match. CHECK RESULTS MANUALLY!",
