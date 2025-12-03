@@ -14,7 +14,7 @@ from fairmd.lipids import RCODE_COMPUTED, RCODE_ERROR, RCODE_SKIPPED
 from fairmd.lipids.core import initialize_databank
 
 
-def run_analysisNEW(method: Callable, logger: Logger, id_range=None, id_list=None) -> None:
+def run_analysis(method: Callable, logger: Logger, id_range=None, id_list=None) -> None:
     """
     Apply analysis ``method`` to the entire databank.
 
@@ -60,7 +60,7 @@ def run_analysisNEW(method: Callable, logger: Logger, id_range=None, id_list=Non
         res = method(system, logger)
         result_dict[res] += 1
 
-    print(f"""
+    logger.info(f"""
     COMPUTED: {result_dict[RCODE_COMPUTED]}
     SKIPPED: {result_dict[RCODE_SKIPPED]}
     ERROR: {result_dict[RCODE_ERROR]}

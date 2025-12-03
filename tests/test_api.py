@@ -417,3 +417,38 @@ def test_GetOP_missing_file_warns(systems, systemid, testmol, result):
         assert resdic[testmol] is result
         # Check a warning was raised containing the molecule name
         assert any(f"{testmol}OrderParameters.json not found" in str(wi.message) for wi in w)
+
+
+def test_run_analysis_interface():
+    from fairmd.lipids import RCODE_COMPUTED, RCODE_ERROR, RCODE_SKIPPED
+    from fairmd.lipids.utils import run_analysis
+
+    # create logger for testing
+    import logging
+    from io import StringIO
+
+    log_stream = StringIO()
+    _logger = logging.getLogger("test_run_analysis")
+    _logger.setLevel(logging.INFO)
+    _logger.addHandler(logging.StreamHandler(log_stream))
+
+    def dummy_method(system, logger):
+        logger.info(f"Dummy method called for system ID {system['ID']}")
+        return RCODE_COMPUTED
+
+    run_analysis(
+        method=dummy_method,
+        logger=_logger,
+        id_range=(None, None),
+    )
+
+    check.is_in("COMPUTED: 5", log_stream.getvalue())
+    check.is_in("SKIPPED: 0", log_stream.getvalue())
+
+    run_analysis(
+        method=dummy_method,
+        logger=_logger,
+        id_list=[86, 281, 243],
+    )
+
+    check.is_in("COMPUTED: 3", log_stream.getvalue())
