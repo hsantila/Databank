@@ -14,7 +14,7 @@ C–H order parameters. For the latter, a quality is calculated both for the ent
 molecule and for molecular fragments, as described below.
 
 The qualities for each simulation record are saved in the files described in
-`Simulation quality files`_.
+:ref:`simulation-quality-files`.
 
 The simulations contained in the databank can then be ranked based on their qualities.
 This is exemplified in the ranking files provided in `Ranking files`_.
