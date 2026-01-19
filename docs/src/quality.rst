@@ -1,3 +1,8 @@
+.. _quality
+
+Simulation quality
+==================
+
 Quality evaluation in the FairMD databank
 ----------------------------------------
 
@@ -17,7 +22,7 @@ The qualities for each simulation record are saved in the files described in
 :ref:`simulation-quality-files`.
 
 The simulations contained in the databank can then be ranked based on their qualities.
-This is exemplified in the ranking files provided in `Ranking files`_.
+This is exemplified in the ranking files provided in :ref:`ranking_files`.
 
 
 Quality evaluation of C–H bond order parameters
@@ -38,16 +43,9 @@ The probability for an order parameter from simulation to lie within experimenta
 bars can be estimated as
 
 .. math::
-   :label: probability
 
-   P =
-   f\!\left(
-     \frac{S_\mathrm{CH} - (S_\mathrm{exp} + \Delta S_\mathrm{exp})}{s / \sqrt{n}}
-   \right)
-   -
-   f\!\left(
-     \frac{S_\mathrm{CH} - (S_\mathrm{exp} - \Delta S_\mathrm{exp})}{s / \sqrt{n}}
-   \right),
+   P = f\!\left(\frac{S_\mathrm{CH} - (S_\mathrm{exp} + \Delta S_\mathrm{exp})}{s / \sqrt{n}}\right)
+     - f\!\left(\frac{S_\mathrm{CH} - (S_\mathrm{exp} - \Delta S_\mathrm{exp})}{s / \sqrt{n}}\right)
 
 where :math:`f(t)` is the first-order Student’s *t*-distribution,
 :math:`n` is the number of independent sample points for each C–H bond (the number of
@@ -112,7 +110,7 @@ minima in some experimental data sets due to noise.
 
 First, fluctuations are filtered from the form factor data using a Savitzky–Golay filter
 (window length 30 and polynomial order 1).
-The first minimum at :math:`q > 0.1\,\mathrm{\AA}^{-1}` is then located for both simulation
+The first minimum at :math:`q > 0.1\,\mathrm{Å}^{-1}` is then located for both simulation
 (:math:`FF_\mathrm{min}^\mathrm{sim}`) and experiment
 (:math:`FF_\mathrm{min}^\mathrm{exp}`).
 
@@ -125,9 +123,6 @@ locations:
    =
    \left| FF_\mathrm{min}^\mathrm{sim} - FF_\mathrm{min}^\mathrm{exp} \right| \times 100.
 
-
-.. _Simulation quality files:
-   https://nmrlipids.github.io/FAIRMD_lipids/stable/dbstructure.html#simulation-quality-files
 
 .. _Ranking files:
    https://github.com/NMRLipids/BilayerData/blob/view-new-rankings/Ranking/

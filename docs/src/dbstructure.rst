@@ -101,10 +101,10 @@ Simulation quality files
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 1. :file:`XXXX_OrderParameters_quality.json` contains a dictionary with the quality of
-   each C-H bond against experiments, if available, for molecule XXXX. First key is the 
-   DOI for the source of experimental data. Second key gives C-H pair univeral atom names. 
-   Third key gives values for simulation order parameter, its stardard deviation, standard 
-   error of the mean, experimental order parameter, its error, and finally the quality of 
+   each C-H bond against experiments, if available, for molecule XXXX. First key is the
+   DOI for the source of experimental data. Second key gives C-H pair univeral atom names.
+   Third key gives values for simulation order parameter, its stardard deviation, standard
+   error of the mean, experimental order parameter, its error, and finally the quality of
    the order parameter. Quality is the probability for the agreement between simulated and
    experimental values taking into account the error bars.
 
@@ -112,7 +112,7 @@ Simulation quality files
    <https://doi.org/10.1038/s41467-024-45189-z>`_.
 
 2. :file:`XXXX_FragmentQuality.json` contains fragment qualities determined separately
-   for each lipid XXXX in the simulation with experimental data available using Eq. (4) 
+   for each lipid XXXX in the simulation with experimental data available using Eq. (4)
    in the `FAIRMD Lipids manuscript <https://doi.org/10.1038/s41467-024-45189-z>`_.
 
 3. :file:`SYSTEM_quality.json` contains total qualities averaged over different lipids
@@ -124,6 +124,12 @@ Simulation quality files
    <https://doi.org/10.1038/s41467-024-45189-z>`_. Second term is the scaling
    coefficient for experimental intensities (Eq. (6) in the `FAIRMD Lipids manuscript
    <https://doi.org/10.1038/s41467-024-45189-z>`_).
+
+.. toctree::
+   :maxdepth: 1
+
+   ../quality.rst
+
 
 .. _dbstructure_exp:
 
