@@ -95,6 +95,8 @@ Simulation computed properties
    particular simulation to sample the ensemble for each lipid molecule. |br|
    See :py:func:`fairmd.lipids.analyze.computeNMRPCA` for computing details.
 
+
+.. _simulation-quality-files:
 Simulation quality files
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
