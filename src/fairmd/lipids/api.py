@@ -33,6 +33,7 @@ import MDAnalysis as mda
 import numpy as np
 
 from fairmd.lipids import FMDL_SIMU_PATH
+from fairmd.lipids.auxiliary import block_average_time_series
 from fairmd.lipids.core import System
 from fairmd.lipids.databankio import download_resource_from_uri, resolve_file_url
 from fairmd.lipids.molecules import Molecule, lipids_set
@@ -115,10 +116,11 @@ def get_OP(system: System) -> dict:  # noqa: N802 (API name)
         try:
             with open(fname) as json_file:
                 op_data = json.load(json_file)
+            new_op_data = {s: v[0] for s, v in op_data.items()}  # get rid of [[...]] structure
         except json.JSONDecodeError as e:
             msg = f"Order parameter data in {fname} is invalid for {system['ID']}"
             raise ValueError(msg) from e
-        sim_op_data[mol] = op_data
+        sim_op_data[mol] = new_op_data
     return sim_op_data
 
 
@@ -159,10 +161,16 @@ def get_quality(
     :param system: Simulation system
     :param part: Part of the system to evaluate quality for (total|tails|headgroup)".
     :param lipid: Lipid name to evaluate quality for (if None, evaluates for all lipids).
-    :param experiment: Experiment type to evaluate quality against (XR|NMR|both).
+    :param experiment: Experiment type to evaluate quality against ("FF"|"OP"|"both").
+           Note: "both" is not implemented yet.
+    :return: quality value (float) or np.nan if not available
+    :raises: ValueError, NotImplementedError
     """
-    if part not in ["total", "headgroup", "tails"] or experiment not in ["FF", "OP", "both"]:
-        msg = "Invalid values for `part` or `experiment`!"
+    if part not in ["total", "headgroup", "tails"]:
+        msg = f"`part` must be one of 'total', 'headgroup', 'tails'. Got '{part}'!"
+        raise ValueError(msg)
+    if experiment not in ["FF", "OP", "both"]:
+        msg = f"`experiment` must be one of 'FF', 'OP', 'both'. Got '{experiment}'!"
         raise ValueError(msg)
     if (part != "total" or lipid is not None) and experiment in ["both", "FF"]:
         msg = "Combined or form-factor qualities are available only for the entire system!"
@@ -197,18 +205,28 @@ def get_quality(
             return np.nan
         with open(spath) as fd:
             qdict = json.load(fd)
-        q = (float(qdict["sn-1"]) + float(qdict["sn-2"])) / 2 if part == "tails" else float(qdict[part])
+        if part == "tails":
+            vals = [qdict.get("sn-1"), qdict.get("sn-2")]
+            vals = [v for v in vals if v is not None]
 
+            if not vals:
+                return np.nan
+
+            return float(np.nanmean(vals))
+
+        else:
+            return float(qdict[part])
     return q
 
 
-def get_mean_ApL(system: System) -> float:  # noqa: N802 (API name)
+def get_ApL_data(system: System, blocksize: float | None = None) -> np.ndarray:  # noqa: N802 (API name)
     """
-    Calculate average area per lipid for a system.
+    Return Area-per-lipid data as a numpy array (block-averaging possible).
 
-    :param system: Simulation object.
+    :param system: Simulation object
+    :param blocksize: Averaged t-series by <blocksize> ps
 
-    :return: area per lipid (Å^2)
+    :return: Array (t, value) with blocksize step.
     """
     path = os.path.join(FMDL_SIMU_PATH, system["path"], "apl.json")
     try:
@@ -220,8 +238,27 @@ def get_mean_ApL(system: System) -> float:  # noqa: N802 (API name)
     except json.JSONDecodeError as e:
         msg = "Area per lipid data for system #{} in {} is invalid.".format(system["ID"], path)
         raise ValueError(msg) from e
-    vals = np.array(list(data.values()))
-    return vals.mean()
+    df = np.vstack(
+        [
+            np.array(list(data.keys()), dtype=float),
+            np.array(list(data.values()), dtype=float),
+        ]
+    ).T
+    if blocksize is not None:
+        df = block_average_time_series(df, blocksize)
+    return df
+
+
+def get_mean_ApL(system: System) -> float:  # noqa: N802 (API name)
+    """
+    Calculate average area per lipid for a system.
+
+    :param system: Simulation object.
+
+    :return: area per lipid (Å^2)
+    """
+    df = get_ApL_data(system)
+    return df[:, 1].mean()
 
 
 def get_total_area(system: System) -> float:
@@ -304,7 +341,7 @@ class UniverseConstructor:
                 # do not download if exists
                 return fpath
             url = resolve_file_url(self._s["DOI"], fname)
-            _ = download_resource_from_uri(url, fpath)
+            _ = download_resource_from_uri(url, fpath, max_restarts=5)
             return fpath
 
         if struc is not None:

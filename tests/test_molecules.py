@@ -28,6 +28,18 @@ def toy_mols() -> dict:
     return {"pope/charmm": mol1, "popc/amber": mol2}
 
 
+def test_mapping_dict():
+    from fairmd.lipids.molecules import lipids_set, MoleculeError
+
+    mol1 = lipids_set.get("POPE")
+    with pytest.raises(MoleculeError, match="not registered"):
+        _ = mol1.mapping_dict
+
+    mol1.register_mapping()
+    mdic = mol1.mapping_dict  # should not raise
+    check.is_in("M_G1_M", mdic, "Mapping dict should contain key 'M_G1_M'")
+
+
 def test_uan2selection(toy_mols):
     toy_pope = toy_mols["pope/charmm"]
     selstr = toy_pope.uan2selection("M_G1C2_M", "POPE")

@@ -17,13 +17,13 @@ import sys
 from logging import Logger
 
 import buildh
-import MDAnalysis as mda
 import numpy as np
 from maicos.core.base import AnalysisCollection
 from tqdm import tqdm
 
 from fairmd.lipids import (
     FMDL_DATA_PATH,
+    FMDL_MAICOS_NCORES,
     FMDL_SIMU_PATH,
     RCODE_COMPUTED,
     RCODE_ERROR,
@@ -38,11 +38,12 @@ from fairmd.lipids.analib.maicos import (
     FormFactorPlanar,
     first_last_carbon,
     is_system_suitable_4_maicos,
-    traj_centering_for_maicos,
+    traj_centering_for_maicos_gromacs,
+    traj_centering_for_maicos_mda,
+    traj_centering_for_maicos_mda_parallel,
 )
 from fairmd.lipids.api import UniverseConstructor, mda_gen_selection_mols
-from fairmd.lipids.auxiliary import elements
-from fairmd.lipids.auxiliary.jsonEncoders import CompactJSONEncoder
+from fairmd.lipids.auxiliary import CompactJSONEncoder, elements
 from fairmd.lipids.core import System
 from fairmd.lipids.molecules import lipids_set
 
@@ -265,7 +266,11 @@ def computeOP(  # noqa: N802 (API)
     # calculating order parameters
     print("Analyzing: ", path)
     uc = UniverseConstructor(system)
-    uc.download_mddata()
+    try:
+        uc.download_mddata()
+    except Exception:
+        logger.exception("Problem with downloading system %s from %s.", system["ID"], system["DOI"])
+        return RCODE_ERROR
 
     # Software and time for equilibration period
     software = system["SOFTWARE"]
@@ -587,7 +592,7 @@ def computeMAICOS(  # noqa: N802 (API)
     try:
         uc.download_mddata()
     except Exception:
-        logger.error(f"Problem with downloading system {system} from {system['DOI']}.")
+        logger.exception(f"Problem with downloading system {system} from {system['DOI']}.")
         return RCODE_ERROR
 
     if uc.paths["top"] is None:
@@ -607,22 +612,57 @@ def computeMAICOS(  # noqa: N802 (API)
         last_atom, g3_atom = first_last_carbon(system, logger)
 
         # Center around one lipid tail CH3 to guarantee all lipids in the same box
-        if "gromacs" in system["SOFTWARE"] and uc.paths["top"] is not None:
-            # xtccentered
-            xtccentered = traj_centering_for_maicos(
+        u = uc.build_universe()
+
+        if "gromacs" in system["SOFTWARE"]:
+            traj_centered = traj_centering_for_maicos_gromacs(
                 spath,
-                uc.paths["traj"],
-                uc.paths["top"],
-                last_atom,
-                g3_atom,
-                eq_time,
+                tpr_name=uc.paths["top"],
+                trj_name=uc.paths["traj"],
+                last_atom=last_atom,
+                g3_atom=g3_atom,
+                eq_time=eq_time,
                 recompute=recompute,
             )
-            u = mda.Universe(uc.paths["top"], xtccentered)
         else:
-            logger.warning("Centering for other than Gromacs is currently not implemented.")
-            # it may not work w/o TPR if there are jumps over periodic boundary conditions in z-direction.
-            u = uc.build_universe()
+            # Use parallel centering by default (None = use all cores, or specific number > 1)
+            # Only use sequential if explicitly set to 1
+            if FMDL_MAICOS_NCORES != 1:
+                try:
+                    n_jobs = FMDL_MAICOS_NCORES if FMDL_MAICOS_NCORES is not None else -1
+                    logger.info(f"Using parallel trajectory centering (n_jobs={n_jobs})")
+                    traj_centered = traj_centering_for_maicos_mda_parallel(
+                        u,
+                        spath,
+                        last_atom,
+                        eq_time,
+                        n_jobs=n_jobs,
+                        recompute=recompute,
+                        logger=logger,
+                        show_progress=True,
+                    )
+                except ImportError:
+                    logger.warning("joblib not available, falling back to sequential centering")
+                    traj_centered = traj_centering_for_maicos_mda(
+                        u,
+                        spath,
+                        last_atom,
+                        eq_time,
+                        recompute=recompute,
+                        logger=logger,
+                    )
+            else:
+                logger.info("Using sequential trajectory centering (FMDL_MAICOS_NCORES=1)")
+                traj_centered = traj_centering_for_maicos_mda(
+                    u,
+                    spath,
+                    last_atom,
+                    eq_time,
+                    recompute=recompute,
+                    logger=logger,
+                )
+        # replace trajectory in universe with centered one
+        u.load_new(traj_centered, format="XTC")
 
         # -- PHILIP code starts here --
         # We us a hardoced bin width

@@ -22,7 +22,7 @@ import yaml
 
 import fairmd.lipids.quality as qq
 from fairmd.lipids import FMDL_EXP_PATH, FMDL_SIMU_PATH
-from fairmd.lipids.auxiliary.jsonEncoders import CompactJSONEncoder
+from fairmd.lipids.auxiliary import CompactJSONEncoder
 
 
 def _round_quality_values(obj: dict | list, ndigits: int = 4) -> dict | list:
@@ -217,9 +217,13 @@ def evaluate_quality():
 
             print("Form factor quality evaluated for ", DATAdir)
             outfile3 = os.path.join(DATAdir, "FormFactorQuality.json")
-            _round_quality_values(results_ff[best_ep])
+
+            ff_quality = list(results_ff[best_ep])
+            _round_quality_values(ff_quality)
+
             with open(outfile3, "w") as f:
-                json.dump(results_ff[best_ep], f)
+                json.dump(ff_quality, f)
+
             evaluated_ff_counter += 1
 
     print("The number of systems with evaluated order parameters:", evaluated_op_counter)

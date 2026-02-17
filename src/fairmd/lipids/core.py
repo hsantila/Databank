@@ -8,15 +8,17 @@ Can be imported without additional libraries to scan Databank system file tree!
 import os
 import sys
 import typing
-from collections.abc import MutableMapping, Sequence
+from collections.abc import MutableMapping
+from typing import Any
 
 import yaml
 
 from fairmd.lipids import FMDL_SIMU_PATH
-from fairmd.lipids.molecules import Lipid, Molecule, NonLipid, lipids_set, molecules_set
+from fairmd.lipids._base import CollectionSingleton, SampleComposition
+from fairmd.lipids.molecules import Lipid, NonLipid, lipids_set, solubles_set
 
 
-class System(MutableMapping):
+class System(MutableMapping, SampleComposition):
     """
     Main Databank single object.
 
@@ -41,18 +43,7 @@ class System(MutableMapping):
             expect_type_msg = "Expected dict or Mapping"
             raise TypeError(expect_type_msg)
 
-        self._content = {}
-        for k, v in self["COMPOSITION"].items():
-            mol = None
-            if k in lipids_set:
-                mol = Lipid(k)
-            elif k in molecules_set:
-                mol = NonLipid(k)
-            else:
-                mol_not_found_msg = f"Molecule {k} is not in the set of lipids or molecules."
-                raise ValueError(mol_not_found_msg)
-            mol.register_mapping(v["MAPPING"])
-            self._content[k] = mol
+        self._initialize_content()
 
     def __getitem__(self, key: str):  # noqa: ANN204
         return self._store[key]
@@ -69,6 +60,9 @@ class System(MutableMapping):
     def __len__(self) -> int:
         return len(self._store)
 
+    def __repr__(self) -> str:
+        return f"System({self._store['ID']}): {self._store['path']}"
+
     @property
     def readme(self) -> dict:
         """Get the README dictionary of the system in true dict format.
@@ -76,16 +70,6 @@ class System(MutableMapping):
         :return: dict-type README (dict)
         """
         return self._store
-
-    @property
-    def content(self) -> dict[str, Molecule]:
-        """Returns dictionary of molecule objects."""
-        return self._content
-
-    @property
-    def lipids(self) -> dict[str, Lipid]:
-        """Returns dictionary of lipid molecule objects."""
-        return {k: v for k, v in self._content.items() if k in lipids_set}
 
     @property
     def n_lipids(self) -> int:
@@ -96,14 +80,23 @@ class System(MutableMapping):
                 total += sum(v["COUNT"])
         return total
 
-    def membrane_composition(self, basis: typing.Literal["molar", "mass"] = "molar") -> dict[str, float]:
-        """Return the composition of the membrane in system.
+    # Implementation of SampleComposition interface
 
-        :param which: Type of composition to return. Options are:
-                      - "molar": compute molar fraction
-                      - "mass": compute mass fraction
-        :return: dictionary (universal molecule name -> value)
-        """
+    def _initialize_content(self) -> None:
+        self._content = {}
+        for k, v in self["COMPOSITION"].items():
+            mol = None
+            if k in lipids_set:
+                mol = Lipid(k)
+            elif k in solubles_set:
+                mol = NonLipid(k)
+            else:
+                mol_not_found_msg = f"Molecule {k} is not in the set of lipids or molecules."
+                raise ValueError(mol_not_found_msg)
+            mol.register_mapping(v["MAPPING"])
+            self._content[k] = mol
+
+    def membrane_composition(self, basis: typing.Literal["molar", "mass"] = "molar") -> dict[str, float]:
         if basis not in ["molar", "mass"]:
             msg = "Basis must be 'molar' or 'mass'"
             raise ValueError(msg)
@@ -129,7 +122,6 @@ class System(MutableMapping):
         return comp
 
     def get_hydration(self, basis: typing.Literal["number", "mass"] = "number") -> float:
-        """Get system hydration."""
         if basis not in ["number", "mass"]:
             msg = "Basis must be 'molar' or 'mass'"
             raise ValueError(msg)
@@ -143,65 +135,45 @@ class System(MutableMapping):
             raise NotImplementedError(msg)
         return hyval
 
-    def __repr__(self) -> str:
-        return f"System({self._store['ID']}): {self._store['path']}"
+    def solution_composition(self, basis="molar"):
+        if basis not in ["molar", "mass"]:
+            msg = "Basis must be 'molar' or 'mass'"
+            raise ValueError(msg)
+        if not self.solubles:
+            return {}  # pure water is allowed here (even for implicit water)
+        if self["COMPOSITION"].get("SOL") is None:
+            msg = "Cannot compute solution composition for implicit water (system #{}).".format(self["ID"])
+            raise ValueError(msg)
+        n_water = self["COMPOSITION"].get("SOL")
+        comp: dict[str, float] = {}
+        for k, v in self["COMPOSITION"].items():
+            if k in lipids_set or k == "SOL":
+                continue
+            # convert to molar concentration
+            # NOTE: we assume dilute solution. Sometimes not true!
+            comp[k] = v["COUNT"] / n_water["COUNT"] * 55.5
+        if basis == "molar":
+            return comp
+        # TODO: solubles doesn't have mass data yet
+        msg = "Mass basis not implemented for solubles."
+        raise NotImplementedError(msg)
 
 
-class SystemsCollection(Sequence[System]):
+class SystemsCollection(CollectionSingleton[System]):
     """Immutable collection of system dicts. Can be accessed by ID using loc()."""
 
-    def __init__(self, iterable: typing.Sequence[System] = []) -> None:
-        self._data = iterable
-        self.__get_index_byid()
+    def _get_item_id(self, item: System) -> int:
+        return item["ID"]
 
-    def __get_index_byid(self) -> None:
-        self._idx: dict = {}
-        for i in range(len(self)):
-            if "ID" in self[i]:
-                self._idx[self[i]["ID"]] = i
+    def _test_item_type(self, item: Any) -> bool:
+        return isinstance(item, System)
 
-    def __getitem__(self, key):
-        return self._data[key]
-
-    def __len__(self) -> int:
-        return len(self._data)
-
-    def loc(self, sid: int) -> System:
-        """Locate system by its ID.
-
-        :param sid: System ID
-        :return: System object with ID `sid`
-        """
-        return self._data[self._idx[sid]]
-
-
-class Databank:
-    """
-    Representation of all simulation in the NMR lipids databank.
-
-    `path` should be the local location of `{FMDL_DATA_PATH}/Simulations/` in
-    the FAIRMD Lipids folder. Example usage to loop over systems:
-
-    .. code-block:: python
-
-        path = 'BilayerData/Simulations/'
-        db_data = databank(path)
-        systems = db_data.get_systems()
-
-        for system in systems:
-            print(system)
-    """
-
-    def __init__(self) -> None:
-        self.path = FMDL_SIMU_PATH
-        __systems = self.__load_systems__()
-        self._systems: SystemsCollection = SystemsCollection(__systems)
-        print("Databank initialized from the folder:", os.path.realpath(self.path))
-
-    def __load_systems__(self) -> list[System]:
-        systems: list[System] = []
-        rpath = os.path.realpath(self.path)
-        for subdir, _dirs, files in os.walk(rpath):
+    @staticmethod
+    def load_from_data() -> "SystemsCollection":
+        """Load systems data from the designated directory."""
+        print("Simulations are initialized from the folder:", os.path.realpath(FMDL_SIMU_PATH))
+        systems = SystemsCollection()
+        for subdir, _dirs, files in os.walk(FMDL_SIMU_PATH):
             for filename in files:
                 filepath = os.path.join(subdir, filename)
                 if filename == "README.yaml":
@@ -209,38 +181,33 @@ class Databank:
                     try:
                         with open(filepath) as yaml_file:
                             ydict.update(yaml.load(yaml_file, Loader=yaml.FullLoader))
-                        content = System(ydict)
                     except (FileNotFoundError, PermissionError) as e:
                         sys.stderr.write(f"""
 !!README LOAD ERROR!!
 Problems while loading on of the files required for the system: {e}
 System path: {subdir}
 System: {ydict!s}\n""")
+                    try:
+                        content = System(ydict)
                     except Exception as e:
                         sys.stderr.write(f"""
 !!README LOAD ERROR!!
 Unexpected error: {e}
 System: {ydict!s}\n""")
                     else:
-                        relpath = os.path.relpath(filepath, rpath)
-                        content["path"] = relpath[:-11]
-                        systems.append(content)
+                        content["path"] = os.path.relpath(subdir, FMDL_SIMU_PATH)
+                        systems.add(content)
         return systems
-
-    def get_systems(self) -> SystemsCollection:
-        """List all systems in the FAIRMD Lipids."""
-        return self._systems
 
 
 def initialize_databank() -> SystemsCollection:
     """
-    Intialize the FAIRMD Lipids.
+    Returns Simulation collection (an alias).
 
     :return: list of dictionaries that contain the content of README.yaml files for
              each system.
     """
-    db_data = Databank()
-    return db_data.get_systems()
+    return SystemsCollection.load_from_data()
 
 
 # TODO: is not used at all in the project!!

@@ -10,6 +10,7 @@ import importlib.util
 import os
 import re
 import sys
+import warnings
 
 from ._version import __version__
 
@@ -41,6 +42,23 @@ FMDL_MOL_PATH: str = os.path.join(FMDL_DATA_PATH, "Molecules")
 
 FMDL_EXP_PATH: str = os.path.join(FMDL_DATA_PATH, "experiments")
 """ Path to the project experiments folder """
+
+FMDL_MAICOS_NCORES: int | None = int(os.environ["FMDL_MAICOS_NCORES"]) if "FMDL_MAICOS_NCORES" in os.environ else None
+""" Number of cores for parallel MAICoS trajectory centering.
+None (default): use all cores if joblib is installed, else sequential.
+Set to 1 to force sequential processing. """
+
+try:
+    import rdkit  # pyright: ignore[reportMissingImports] # noqa: F401
+
+    _HAS_RDKIT = True
+except ImportError:
+    warnings.warn(
+        "Warning: RDKit not found. Some FAIRMD Lipids functionalities will be disabled.",
+        ImportWarning,
+        stacklevel=2,
+    )
+    _HAS_RDKIT = False
 
 # Universal return codes
 
@@ -99,6 +117,7 @@ and then specify by FMDL_DATA_PATH environment variable."""
 __all__ = [
     "FMDL_DATA_PATH",
     "FMDL_EXP_PATH",
+    "FMDL_MAICOS_NCORES",
     "FMDL_MOL_PATH",
     "FMDL_SIMU_PATH",
     "RCODE_COMPUTED",

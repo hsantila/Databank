@@ -26,7 +26,7 @@ pytestmark = [pytest.mark.sim2, pytest.mark.min]
 # for vector comparisons with np.testing.assert_allclose
 MAXRELERR_COMPARE_THRESHOLD = 1e-2
 # testable constants
-N_SYSTEMS_IN_TESTSET = 5
+N_SYSTEMS_IN_TESTSET = 6
 
 
 @pytest.fixture(scope="module")
@@ -120,6 +120,29 @@ def test_get_mean_apl(systems, systemid, result):
 
 
 @pytest.mark.parametrize(
+    "systemid, nlines",
+    [
+        (281, 1001),
+        (566, 401),  # 1
+    ],
+)
+def test_get_apl_data(systems, systemid, nlines):
+    from fairmd.lipids.api import get_ApL_data
+
+    s = systems.loc(systemid)
+    df = get_ApL_data(s)
+    check.is_true(isinstance(df, np.ndarray))
+    check.equal(df.shape[1], 2)
+    check.equal(df.shape[0], nlines)
+    # block-average behavior
+    df1k = get_ApL_data(s, blocksize=1000)
+    df2k = get_ApL_data(s, blocksize=2000)
+    df3k = get_ApL_data(s, blocksize=3000)
+    check.almost_equal(df1k[0:2, 1].mean(), df2k[0, 1], abs=1e-7)
+    check.almost_equal(df1k[0:3, 1].mean(), df3k[0, 1], abs=1e-7)
+
+
+@pytest.mark.parametrize(
     "systemid, result",
     [(281, 4142.234), (566, 3923.568), (787, 4694.191), (243, 2241.920), (86, 3869.417)],
 )
@@ -198,6 +221,24 @@ def test_membrane_composition(systems, systemid, lipid, result_molar, result_mas
     for i, lip in enumerate(lipid):
         err += (mass_fractions[lip] - result_mass[i]) ** 2
     check.almost_equal(err, 0, abs=1e-5)
+
+
+@pytest.mark.parametrize(
+    "systemid, result_molar",
+    [
+        (243, {"SOD": 0.155, "CLA": 0.155}),
+        (787, {"SOD": 0.37}),
+        (281, {}),
+    ],
+)
+def test_solution_composition(systems, systemid, result_molar):
+    sys0 = systems.loc(systemid)
+    molar_fractions = sys0.solution_composition(basis="molar")
+    with check.raises(ValueError):
+        _ = sys0.solution_composition(basis="invalid_option")
+    check.equal(molar_fractions.keys(), result_molar.keys())
+    for k, v in result_molar.items():
+        check.almost_equal(molar_fractions[k], v, abs=1e-3)
 
 
 @pytest.mark.parametrize(
@@ -320,6 +361,7 @@ def test_get_OP_reads_valid_json(systems, systemid, lipid):
     resdic = get_OP(sys0)
 
     assert lipid in resdic
+    np.testing.assert_allclose(resdic[lipid]["M_G1_M M_G1H1_M"], np.array([-0.169826, 0.0268957, 0.00238661]))
 
 
 @pytest.mark.parametrize(
@@ -402,7 +444,7 @@ def test_run_analysis_interface():
         id_range=(None, None),
     )
 
-    check.is_in("COMPUTED: 5", log_stream.getvalue())
+    check.is_in(f"COMPUTED: {N_SYSTEMS_IN_TESTSET}", log_stream.getvalue())
     check.is_in("SKIPPED: 0", log_stream.getvalue())
 
     run_analysis(

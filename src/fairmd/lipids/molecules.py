@@ -12,12 +12,14 @@ import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import MutableSet
+from copy import copy
+from glob import glob
 from typing import Any
 
 import MDAnalysis as mda
 import yaml
 
-from fairmd.lipids import FMDL_MOL_PATH
+from fairmd.lipids import _HAS_RDKIT, FMDL_MOL_PATH
 
 
 class MoleculeError(Exception):
@@ -67,13 +69,22 @@ class Molecule(ABC):
         :return: str path
         """
 
-    def register_mapping(self, fname: str) -> None:
+    def register_mapping(self, fname: str | None = None) -> None:
         """
         Register mapping dictionary for the Molecule object
 
-        :param fname: mapping filename (without path)
+        :param fname: mapping filename (without path) or None to auto-detect
         :return:
         """
+        # iterate over possible paths
+        if fname is None:
+            path = self._get_path()
+            _possible_mfiles = [os.path.basename(f) for f in glob(os.path.join(path, "mapping*.y*ml"))]
+            if len(_possible_mfiles) == 0:
+                msg = f"No mapping file found in {self._get_path()}"
+                raise MoleculeMappingError(msg, mol=self)
+            fname = _possible_mfiles[0]  # take the first one
+        # set mapping file path
         self._disp_mapping = fname
         self._mapping_fpath = os.path.join(self._get_path(), fname)
         if not os.path.isfile(self._mapping_fpath):
@@ -105,9 +116,16 @@ class Molecule(ABC):
     @property
     def mapping_dict(self) -> dict:
         """Return mapping dictionary (load on first call)"""
+        if self._mapping_fpath is None:
+            msg = "Mapping file is not registered!"
+            raise MoleculeError(msg, mol=self)
         if self._mapping_dict is None:
-            with open(self._mapping_fpath) as yaml_file:
-                self._mapping_dict = yaml.safe_load(yaml_file)  # yaml.load(yaml_file, Loader=yaml.FullLoader)
+            try:
+                with open(self._mapping_fpath) as yaml_file:
+                    self._mapping_dict = yaml.safe_load(yaml_file)  # yaml.load(yaml_file, Loader=yaml.FullLoader)
+            except OSError as e:
+                msg = "Error opening mapping-file!"
+                raise MoleculeError(msg, mol=self) from e
         return self._mapping_dict
 
     def md2uan(self, mdatomname: str, mdresname: str | None = None) -> str:
@@ -259,6 +277,82 @@ class Lipid(Molecule):
         super().__init__(name)
         self._populate_meta_data()
 
+    def smi2uan(self, smile_id: int) -> str:
+        """Convert SMILEIDX to universal atomname"""
+        if smile_id < 0:
+            msg = "ID<0: out of range"
+            raise KeyError(msg)
+        max_smid = 0
+        for universal_name, mrecord in self.mapping_dict.items():
+            smi = mrecord.get("SMILEIDX", -1)
+            if smi == smile_id:
+                return universal_name
+            max_smid = max(max_smid, smi)
+        if smile_id > max_smid:
+            msg = f"ID>{max_smid}: out of range"
+            raise KeyError(msg)
+
+        emsg = f"Atom with SMILEIDX {smile_id} is not found."
+        raise MoleculeMappingError(emsg, mol=self)
+
+    @property
+    def rdkit_object(self) -> "rdkit.Chem.Mol":  # noqa: F821
+        """
+        Return RDKit molecule object for the lipid.
+
+        :return: RDKit molecule object
+        """
+        if not _HAS_RDKIT:
+            msg = "RDKit is required for RDKit molecule object. Please install the 'rdkit' extra."
+            raise ImportError(msg)
+
+        from rdkit import Chem  # noqa: PLC0415
+
+        if "smiles" not in self.metadata.get("bioschema_properties", {}):
+            msg = (
+                "SMILES is obligatory in `bioschema_properties->smiles` "
+                "to request SMARTS and use cheminformatic integration."
+            )
+            raise MoleculeError(msg, mol=self)
+        _smiles = self.metadata["bioschema_properties"]["smiles"]
+        rdkit_mol = Chem.MolFromSmiles(_smiles)
+        if rdkit_mol is None:
+            msg = f"Invalid SMILES for molecule {self.name}: {_smiles}"
+            raise MoleculeError(msg, mol=self)
+        return rdkit_mol
+
+    def atoms_by(self, query: str, id: int) -> list[str]:
+        """
+        Return list of universal atom names matching the SMARTS query|id.
+
+        :param query: SMARTS pattern
+        :type query: str
+        :param id: Position inside SMARTS pattern
+        :type id: int
+        :return: list of universal atom names matching the query
+        :rtype: list[str]
+        """
+        list_unames = []
+        rdkit_mol = self.rdkit_object  # import check happens here
+
+        from rdkit import Chem  # noqa: PLC0415
+
+        patt = Chem.MolFromSmarts(query)
+        if patt is None:
+            msg = "SMART syntax error (see above)"
+            raise ValueError(msg)
+        if id < 0 or id > patt.GetNumHeavyAtoms() - 1:
+            msg = f"SMARTS '{query}' has {patt.GetNumHeavyAtoms()} heavy atoms. {id} out of range."
+            raise KeyError(msg)
+
+        matches = rdkit_mol.GetSubstructMatches(patt)
+        for match in matches:
+            atom_idx = match[id]
+            # USE FURHTER: rdk_atom = rdkit_mol.GetAtomWithIdx(atom_idx)
+            list_unames.append(self.smi2uan(atom_idx))
+
+        return list_unames
+
 
 class NonLipid(Molecule):
     """Class for non-bilayer molecules: solvent, ions, etc."""
@@ -355,7 +449,7 @@ class MoleculeSet(MutableSet[Molecule], ABC):
 
     def get(self, key: str, default=None) -> Molecule | None:
         """
-        Get a molecule by its name.
+        Get a molecule by its name (copy-object).
 
         :param key: The name of the molecule to retrieve.
         :param default: The value to return if the molecule is not found.
@@ -363,7 +457,7 @@ class MoleculeSet(MutableSet[Molecule], ABC):
         if key.upper() in self._names:
             for item in self._items:
                 if item.name.upper() == key.upper():
-                    return item
+                    return copy(item)
         return default
 
     def __repr__(self) -> str:
@@ -428,16 +522,10 @@ class NonLipidSet(MoleculeSet):
 lipids_set: LipidSet = LipidSet.load_from_data()
 """ MutableSet of possible lipids """
 
-lipids_dict = lipids_set
-""" @deprecated: Use lipids_set instead. """
-
-molecules_set: NonLipidSet = NonLipidSet.load_from_data()
+solubles_set: NonLipidSet = NonLipidSet.load_from_data()
 """ Dictionary of other than lipid molecules. """
 
-molecules_dict = molecules_set
-""" @deprecated: Use molecules_set instead"""
-
-molecule_ff_set = {("FF" + x) for x in (lipids_set.names | molecules_set.names)}
+molecule_ff_set = {("FF" + x) for x in (lipids_set.names | solubles_set.names)}
 """
 Dictionary containing possible force-field labels for molecules given by the contributor
  (used for README/info fields validation)
